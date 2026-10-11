@@ -3626,6 +3626,42 @@ local function sendTradeWebhook(trade)
 	end)
 end
 
+-- Raw owned counts across every branch, no value lookup. The trade
+-- window closes the same way whether the trade went through or was
+-- cancelled; only the inventory tells the two apart.
+local function ownedCounts()
+	local remote = resolveRemote()
+	if not remote then return nil end
+
+	local status, data = invokeWithTimeout(remote, LocalPlayer)
+	if status ~= "ok" or typeof(data) ~= "table" then return nil end
+
+	local counts = {}
+	for _, branch in ipairs(INVENTORY_BRANCHES) do
+		local node = data[branch]
+		if type(node) == "table" then
+			local owned = (type(node.Owned) == "table") and node.Owned or node
+			for name, count in pairs(owned) do
+				local amount = tonumber(count)
+				if type(name) == "string" and amount then
+					counts[branch .. "/" .. name] = amount
+				end
+			end
+		end
+	end
+	return counts
+end
+
+local function sameCounts(a, b)
+	for key, amount in pairs(a) do
+		if b[key] ~= amount then return false end
+	end
+	for key, amount in pairs(b) do
+		if a[key] ~= amount then return false end
+	end
+	return true
+end
+
 -- ===================================================================
 -- TRADE WATCHER
 -- Polling, not a signal: MM2 rebuilds the trade window every time a
@@ -3636,6 +3672,10 @@ task.spawn(function()
 	local lastSignature = "none"
 	local lastTrade = nil
 	local wait = TRADE_POLL_IDLE
+
+	-- inventory as it was when the current trade opened
+	local beforeCounts = nil
+	local tradeId = 0
 
 	while true do
 		task.wait(wait)
@@ -3671,6 +3711,14 @@ task.spawn(function()
 						local myTotal    = sumOf(trade.mine)
 
 						if opened then
+							tradeId = tradeId + 1
+							local id = tradeId
+							beforeCounts = nil
+							task.spawn(function()
+								local counts = ownedCounts()
+								if id == tradeId then beforeCounts = counts end
+							end)
+
 							log("Trade opened with " .. (trade.partner or "someone"))
 							pcall(raiseAbove)
 							pcall(ui.showPage, 4)
@@ -3684,14 +3732,28 @@ task.spawn(function()
 					else
 						log("Trade window closed")
 
-						-- MM2 closes the window the moment the second side
-						-- accepts, so an accepted banner on the last view
-						-- means the trade went through.
-						if lastTrade and (lastTrade.mineAccepted or lastTrade.theirAccepted) then
-							log("Trade completed, posting to Discord")
-							sendTradeWebhook(lastTrade)
+						-- Only a trade that changed the inventory went
+						-- through. MM2 hands the items over a moment after
+						-- the window closes, so look a few times.
+						local finished, before = lastTrade, beforeCounts
+						lastTrade, beforeCounts = nil, nil
+
+						if finished and before then
+							task.spawn(function()
+								for _ = 1, 4 do
+									task.wait(1.5)
+									local after = ownedCounts()
+									if after and not sameCounts(before, after) then
+										log("Trade completed, posting to Discord")
+										sendTradeWebhook(finished)
+										return
+									end
+								end
+								log("Trade closed without going through")
+							end)
+						elseif finished then
+							log("Inventory was not read when the trade opened, nothing posted")
 						end
-						lastTrade = nil
 					end
 				end
 			end
