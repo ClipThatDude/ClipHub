@@ -12,10 +12,10 @@
   value table and totals it per category. It reads other players the
   same way, so no inventory window has to be opened.
 
-  What it does not do
-  -------------------
-  No trades, no API, no server hopping, no simulated clicks. It only
-  reads and displays.
+  Auto accept
+  -----------
+  Accepts every incoming trade request and presses ACCEPT in the
+  trade window once MM2's countdown ends. No whitelist.
 ===================================================================
 ]]
 
@@ -3550,6 +3550,167 @@ task.spawn(function()
 		else
 			wait = TRADE_POLL_IDLE
 		end
+	end
+end)
+
+
+-- ===================================================================
+-- AUTO ACCEPT
+--
+-- Accepts every incoming trade request and, once the trade window is
+-- open, presses ACCEPT after MM2's "Please wait (N)" countdown ends.
+-- There is no whitelist: anyone's trade is accepted.
+--
+-- The countdown is the guard. MM2 restarts it whenever an item goes in
+-- or out, so ACCEPT is only pressed after it has been seen and has run
+-- out; a trade that never showed a countdown is never accepted.
+-- ===================================================================
+local GuiService = game:GetService("GuiService")
+local VIM        = game:GetService("VirtualInputManager")
+
+local function isShown(obj)
+	return onScreen(obj)
+end
+
+local function clean(s)
+	return ((s or ""):upper():gsub("%s", ""))
+end
+
+local function countdownVisible()
+	for _, obj in ipairs(PlayerGui:GetDescendants()) do
+		if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isShown(obj) then
+			if obj.Text:lower():find("please wait") then
+				return true, obj.Text
+			end
+		end
+	end
+	return false
+end
+
+-- The visible ACCEPT in the trade window, not the one on the request
+-- box and not the panel's own buttons.
+local function findAcceptText()
+	for _, obj in ipairs(PlayerGui:GetDescendants()) do
+		if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isShown(obj) then
+			local path = obj:GetFullName()
+			if clean(obj.Text) == "ACCEPT"
+				and not path:find("ReceivingRequest")
+				and not path:find("Prestige")
+				and not (ui.gui and obj:IsDescendantOf(ui.gui)) then
+				return obj
+			end
+		end
+	end
+	return nil
+end
+
+-- the button a text belongs to: itself, a parent, or a sibling
+local function findClickable(textObj)
+	if textObj:IsA("GuiButton") then return textObj end
+	local cur = textObj.Parent
+	for _ = 1, 3 do
+		if not cur then break end
+		if cur:IsA("GuiButton") then return cur end
+		cur = cur.Parent
+	end
+	for _, sib in ipairs(textObj.Parent:GetChildren()) do
+		if sib:IsA("GuiButton") and isShown(sib) then return sib end
+	end
+	return nil
+end
+
+local function fireSignals(btn)
+	local ok = false
+	if getconnections then
+		for _, sig in ipairs({ "MouseButton1Click", "MouseButton1Down", "MouseButton1Up", "Activated" }) do
+			pcall(function()
+				for _, conn in ipairs(getconnections(btn[sig])) do
+					conn:Fire()
+					ok = true
+				end
+			end)
+		end
+	end
+	if not ok and firesignal then
+		pcall(function() firesignal(btn.MouseButton1Click) ok = true end)
+	end
+	return ok
+end
+
+-- fallback: a real click on the middle of the object
+local function mouseClick(obj)
+	local inset = GuiService:GetGuiInset()
+	local pos = obj.AbsolutePosition + obj.AbsoluteSize / 2 + inset
+	VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 1)
+	task.wait(0.05)
+	VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 1)
+end
+
+-- signals first, a real click only if the button is still there
+local function pressButton(btn, stillVisibleCheck)
+	fireSignals(btn)
+	task.wait(1)
+	if stillVisibleCheck() then
+		mouseClick(btn)
+	end
+end
+
+-- 1) INCOMING TRADE REQUEST: ACCEPT
+task.spawn(function()
+	while true do
+		task.wait(1)
+		local ok, err = pcall(function()
+			local req
+			for _, obj in ipairs(PlayerGui:GetDescendants()) do
+				if obj.Name == "ReceivingRequest" and obj:IsA("GuiObject") and isShown(obj) then
+					req = obj
+					break
+				end
+			end
+			if not req then return end
+
+			local acceptBtn = req:FindFirstChild("Accept", true)
+			if acceptBtn and acceptBtn:IsA("GuiButton") then
+				log("Trade request received, accepting")
+				pressButton(acceptBtn, function() return isShown(req) end)
+			end
+
+			task.wait(2)
+		end)
+		if not ok then log("Auto accept (request): " .. tostring(err)) end
+	end
+end)
+
+-- 2) PRESS ACCEPT WHEN THE COUNTDOWN ENDS
+task.spawn(function()
+	local armed = false
+
+	while true do
+		task.wait(3)
+		local ok, err = pcall(function()
+			if countdownVisible() then
+				armed = true
+				return
+			end
+			if not armed then return end
+
+			local textObj = findAcceptText()
+			if not textObj then return end
+
+			local btn = findClickable(textObj)
+			if btn then fireSignals(btn) end
+
+			task.wait(1)
+
+			if findAcceptText() then
+				mouseClick(btn or textObj)
+			end
+
+			log("Trade accepted")
+			armed = false
+			task.wait(3)
+		end)
+		if not ok then log("Auto accept (trade): " .. tostring(err)) end
 	end
 end)
 
