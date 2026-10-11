@@ -3514,38 +3514,108 @@ local httpRequest = (syn and syn.request)
 	or (fluxus and fluxus.request)
 	or request
 
+-- MM2 accent colours for the embed bar
+local EMBED_GREEN = 0x3BA55D
+local EMBED_RED   = 0xED4245
+local EMBED_GREY  = 0x99AAB5
+
+local tradesThisSession = 0
+
+-- one item per line, biggest first:  • **Blossom** ×2 — `2,640`
 local function itemLines(list)
-	if #list == 0 then return "Nothing" end
+	if #list == 0 then return "*Nothing*" end
+
+	local sorted = table.clone(list)
+	table.sort(sorted, function(a, b) return a.value * a.amount > b.value * b.amount end)
+
 	local lines = {}
-	for _, it in ipairs(list) do
-		lines[#lines + 1] = string.format("%dx %s  (%s)", it.amount, it.name, comma(it.value * it.amount))
+	for i, it in ipairs(sorted) do
+		if i > 10 then
+			lines[#lines + 1] = string.format("*…and %d more*", #sorted - 10)
+			break
+		end
+		local qty = it.amount > 1 and (" ×" .. it.amount) or ""
+		lines[#lines + 1] = string.format("• **%s**%s — `%s`", it.name, qty, comma(it.value * it.amount))
 	end
 	return table.concat(lines, "\n")
+end
+
+-- MM2 shows the display name in the trade window, so match either.
+local function playerByName(name)
+	if not name then return nil end
+	local lower = name:lower()
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p.Name:lower() == lower or p.DisplayName:lower() == lower then
+			return p
+		end
+	end
+	return nil
+end
+
+local function headshotUrl(userId)
+	local ok, res = pcall(httpRequest, {
+		Url = "https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds="
+			.. userId .. "&size=150x150&format=Png",
+		Method = "GET",
+	})
+	if not ok or not res or not res.Body then return nil end
+	local decoded, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+	if not decoded then return nil end
+	return data and data.data and data.data[1] and data.data[1].imageUrl
 end
 
 local function sendTradeWebhook(trade)
 	local url = webhookUrl()
 	if not url or not httpRequest then return end
 
-	local theirTotal = sumOf(trade.their)
-	local myTotal    = sumOf(trade.mine)
+	tradesThisSession = tradesThisSession + 1
+	local tradeNumber = tradesThisSession
 
-	local body = HttpService:JSONEncode({
-		embeds = { {
-			title  = "Trade completed",
-			color  = 0x55C8FF,
-			fields = {
-				{ name = "Account", value = LocalPlayer.Name, inline = true },
-				{ name = "Partner", value = trade.partner or "unknown", inline = true },
-				{ name = "Difference", value = comma(theirTotal - myTotal), inline = true },
-				{ name = "Received (" .. comma(theirTotal) .. ")", value = itemLines(trade.their) },
-				{ name = "Given (" .. comma(myTotal) .. ")", value = itemLines(trade.mine) },
-			},
-			timestamp = DateTime.now():ToIsoDate(),
-		} },
-	})
+	local theirTotal, theirCount = sumOf(trade.their)
+	local myTotal, myCount       = sumOf(trade.mine)
+	local diff = theirTotal - myTotal
 
+	local colour, verdict = EMBED_GREY, "Even"
+	if diff > 0 then
+		colour, verdict = EMBED_GREEN, "Win"
+	elseif diff < 0 then
+		colour, verdict = EMBED_RED, "Loss"
+	end
+
+	-- the HTTP calls run off the trade loop
 	task.spawn(function()
+		local partner = playerByName(trade.partner)
+		local partnerName = partner and partner.Name or trade.partner or "unknown"
+		local partnerLine = partner
+			and string.format("[%s](https://www.roblox.com/users/%d/profile)", partnerName, partner.UserId)
+			or partnerName
+
+		local body = HttpService:JSONEncode({
+			username = "MM2 Trade Bot",
+			embeds = { {
+				author = {
+					name     = LocalPlayer.Name,
+					url      = "https://www.roblox.com/users/" .. LocalPlayer.UserId .. "/profile",
+					icon_url = headshotUrl(LocalPlayer.UserId),
+				},
+				title       = "✅  Trade Completed",
+				description = "Traded with **" .. partnerLine .. "**",
+				color       = colour,
+				thumbnail   = partner and { url = headshotUrl(partner.UserId) } or nil,
+				fields = {
+					{ name = "📥  Received · " .. theirCount .. " items", value = itemLines(trade.their), inline = true },
+					{ name = "📤  Given · " .. myCount .. " items",        value = itemLines(trade.mine),  inline = true },
+					{ name = "\u{200B}", value = "\u{200B}", inline = false },
+					{ name = "Received value", value = "```" .. comma(theirTotal) .. "```", inline = true },
+					{ name = "Given value",    value = "```" .. comma(myTotal) .. "```",    inline = true },
+					{ name = "Profit · " .. verdict, value = "```diff\n" .. (diff < 0 and "- " or "+ ")
+						.. comma(math.abs(diff)) .. "```", inline = true },
+				},
+				footer    = { text = "MM2 Value Panel  •  Trade #" .. tradeNumber .. " this session" },
+				timestamp = DateTime.now():ToIsoDate(),
+			} },
+		})
+
 		local ok, err = pcall(httpRequest, {
 			Url = url, Method = "POST",
 			Headers = { ["Content-Type"] = "application/json" },
