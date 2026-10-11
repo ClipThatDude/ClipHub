@@ -3519,11 +3519,29 @@ local EMBED_GREEN = 0x3BA55D
 local EMBED_RED   = 0xED4245
 local EMBED_GREY  = 0x99AAB5
 
-local tradesThisSession = 0
+-- a coloured marker per rarity, so the lists read at a glance
+local RARITY_MARK = {
+	Unique  = "⭐",
+	Ancient = "🟪",
+	Chroma  = "🌈",
+	Godly   = "🟥",
+	Vintage = "🟨",
+}
 
--- one item per line, biggest first:  • **Blossom** ×2 — `2,640`
+local tradesThisSession = 0
+local sessionProfit     = 0
+
+local function plural(n, word)
+	return n .. " " .. word .. (n == 1 and "" or "s")
+end
+
+local function signed(n)
+	return (n > 0 and "+" or n < 0 and "-" or "±") .. comma(math.abs(n))
+end
+
+-- one item per line, biggest first:  🌈 **Chroma Raygun** — `15,000`
 local function itemLines(list)
-	if #list == 0 then return "*Nothing*" end
+	if #list == 0 then return "-# Nothing" end
 
 	local sorted = table.clone(list)
 	table.sort(sorted, function(a, b) return a.value * a.amount > b.value * b.amount end)
@@ -3531,11 +3549,12 @@ local function itemLines(list)
 	local lines = {}
 	for i, it in ipairs(sorted) do
 		if i > 10 then
-			lines[#lines + 1] = string.format("*…and %d more*", #sorted - 10)
+			lines[#lines + 1] = string.format("-# …and %d more", #sorted - 10)
 			break
 		end
-		local qty = it.amount > 1 and (" ×" .. it.amount) or ""
-		lines[#lines + 1] = string.format("• **%s**%s — `%s`", it.name, qty, comma(it.value * it.amount))
+		local mark = RARITY_MARK[it.category] or "▫️"
+		local qty  = it.amount > 1 and (" `×" .. it.amount .. "`") or ""
+		lines[#lines + 1] = string.format("%s **%s**%s — `%s`", mark, it.name, qty, comma(it.value * it.amount))
 	end
 	return table.concat(lines, "\n")
 end
@@ -3568,18 +3587,19 @@ local function sendTradeWebhook(trade)
 	local url = webhookUrl()
 	if not url or not httpRequest then return end
 
-	tradesThisSession = tradesThisSession + 1
-	local tradeNumber = tradesThisSession
-
 	local theirTotal, theirCount = sumOf(trade.their)
 	local myTotal, myCount       = sumOf(trade.mine)
 	local diff = theirTotal - myTotal
 
-	local colour, verdict = EMBED_GREY, "Even"
+	tradesThisSession = tradesThisSession + 1
+	sessionProfit     = sessionProfit + diff
+	local tradeNumber, sessionTotal = tradesThisSession, sessionProfit
+
+	local colour, verdict, dot = EMBED_GREY, "EVEN", "⚪"
 	if diff > 0 then
-		colour, verdict = EMBED_GREEN, "Win"
+		colour, verdict, dot = EMBED_GREEN, "WIN", "🟢"
 	elseif diff < 0 then
-		colour, verdict = EMBED_RED, "Loss"
+		colour, verdict, dot = EMBED_RED, "LOSS", "🔴"
 	end
 
 	-- the HTTP calls run off the trade loop
@@ -3590,28 +3610,31 @@ local function sendTradeWebhook(trade)
 			and string.format("[%s](https://www.roblox.com/users/%d/profile)", partnerName, partner.UserId)
 			or partnerName
 
+		local description = table.concat({
+			"## " .. dot .. "  " .. signed(diff) .. "  ·  " .. verdict,
+			"`" .. comma(theirTotal) .. "` received  ⇄  `" .. comma(myTotal) .. "` given",
+			"Traded with **" .. partnerLine .. "**",
+		}, "\n")
+
 		local body = HttpService:JSONEncode({
 			username = "MM2 Trade Bot",
 			embeds = { {
 				author = {
-					name     = LocalPlayer.Name,
+					name     = LocalPlayer.Name .. "  ·  Trade #" .. tradeNumber,
 					url      = "https://www.roblox.com/users/" .. LocalPlayer.UserId .. "/profile",
 					icon_url = headshotUrl(LocalPlayer.UserId),
 				},
-				title       = "✅  Trade Completed",
-				description = "Traded with **" .. partnerLine .. "**",
+				description = description,
 				color       = colour,
 				thumbnail   = partner and { url = headshotUrl(partner.UserId) } or nil,
 				fields = {
-					{ name = "📥  Received · " .. theirCount .. " items", value = itemLines(trade.their), inline = true },
-					{ name = "📤  Given · " .. myCount .. " items",        value = itemLines(trade.mine),  inline = true },
-					{ name = "\u{200B}", value = "\u{200B}", inline = false },
-					{ name = "Received value", value = "```" .. comma(theirTotal) .. "```", inline = true },
-					{ name = "Given value",    value = "```" .. comma(myTotal) .. "```",    inline = true },
-					{ name = "Profit · " .. verdict, value = "```diff\n" .. (diff < 0 and "- " or "+ ")
-						.. comma(math.abs(diff)) .. "```", inline = true },
+					{ name = "📥  Received  ·  " .. plural(theirCount, "item"), value = itemLines(trade.their), inline = true },
+					{ name = "📤  Given  ·  " .. plural(myCount, "item"),        value = itemLines(trade.mine),  inline = true },
 				},
-				footer    = { text = "MM2 Value Panel  •  Trade #" .. tradeNumber .. " this session" },
+				footer = {
+					text = plural(tradeNumber, "trade") .. " this session  ·  Session profit "
+						.. signed(sessionTotal),
+				},
 				timestamp = DateTime.now():ToIsoDate(),
 			} },
 		})
