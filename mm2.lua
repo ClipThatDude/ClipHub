@@ -3521,7 +3521,8 @@ local EMBED_GREY  = 0x99AAB5
 
 local tradesThisSession = 0
 
--- one item per line, biggest first:  • **Blossom** ×2 — `2,640`
+-- one item per line, biggest first:  `2,640` · **Blossom** ×2
+-- The value goes first so a long name cannot push it onto its own line.
 local function itemLines(list)
 	if #list == 0 then return "*Nothing*" end
 
@@ -3535,7 +3536,7 @@ local function itemLines(list)
 			break
 		end
 		local qty = it.amount > 1 and (" ×" .. it.amount) or ""
-		lines[#lines + 1] = string.format("• **%s**%s — `%s`", it.name, qty, comma(it.value * it.amount))
+		lines[#lines + 1] = string.format("`%s` · **%s**%s", comma(it.value * it.amount), it.name, qty)
 	end
 	return table.concat(lines, "\n")
 end
