@@ -3490,6 +3490,72 @@ downloadValues(function(ok, detail)
 end)
 
 -- ===================================================================
+-- DISCORD WEBHOOK
+--
+-- Every finished trade is posted to Discord. The link is read from
+-- mm2_webhook.txt in the executor's workspace folder, not written
+-- here, because this file is public and anyone holding the link can
+-- post to the channel. No file, no posts.
+-- ===================================================================
+local WEBHOOK_FILE = "mm2_webhook.txt"
+
+local function webhookUrl()
+	local ok, url = pcall(function()
+		if isfile and isfile(WEBHOOK_FILE) then return readfile(WEBHOOK_FILE) end
+	end)
+	if not ok or type(url) ~= "string" then return nil end
+	url = url:gsub("^%s+", ""):gsub("%s+$", "")
+	return url ~= "" and url or nil
+end
+
+local httpRequest = (syn and syn.request)
+	or (http and http.request)
+	or http_request
+	or (fluxus and fluxus.request)
+	or request
+
+local function itemLines(list)
+	if #list == 0 then return "Nothing" end
+	local lines = {}
+	for _, it in ipairs(list) do
+		lines[#lines + 1] = string.format("%dx %s  (%s)", it.amount, it.name, comma(it.value * it.amount))
+	end
+	return table.concat(lines, "\n")
+end
+
+local function sendTradeWebhook(trade)
+	local url = webhookUrl()
+	if not url or not httpRequest then return end
+
+	local theirTotal = sumOf(trade.their)
+	local myTotal    = sumOf(trade.mine)
+
+	local body = HttpService:JSONEncode({
+		embeds = { {
+			title  = "Trade completed",
+			color  = 0x55C8FF,
+			fields = {
+				{ name = "Account", value = LocalPlayer.Name, inline = true },
+				{ name = "Partner", value = trade.partner or "unknown", inline = true },
+				{ name = "Difference", value = comma(theirTotal - myTotal), inline = true },
+				{ name = "Received (" .. comma(theirTotal) .. ")", value = itemLines(trade.their) },
+				{ name = "Given (" .. comma(myTotal) .. ")", value = itemLines(trade.mine) },
+			},
+			timestamp = DateTime.now():ToIsoDate(),
+		} },
+	})
+
+	task.spawn(function()
+		local ok, err = pcall(httpRequest, {
+			Url = url, Method = "POST",
+			Headers = { ["Content-Type"] = "application/json" },
+			Body = body,
+		})
+		if not ok then log("Webhook failed: " .. tostring(err)) end
+	end)
+end
+
+-- ===================================================================
 -- TRADE WATCHER
 -- Polling, not a signal: MM2 rebuilds the trade window every time a
 -- slot changes, so there is nothing stable to connect to. The poll is
@@ -3497,6 +3563,7 @@ end)
 -- ===================================================================
 task.spawn(function()
 	local lastSignature = "none"
+	local lastTrade = nil
 	local wait = TRADE_POLL_IDLE
 
 	while true do
@@ -3528,6 +3595,7 @@ task.spawn(function()
 					pcall(ui.renderTrade, trade)
 
 					if trade then
+						lastTrade = trade
 						local theirTotal = sumOf(trade.their)
 						local myTotal    = sumOf(trade.mine)
 
@@ -3544,6 +3612,15 @@ task.spawn(function()
 							comma(theirTotal), comma(myTotal)))
 					else
 						log("Trade window closed")
+
+						-- MM2 closes the window the moment the second side
+						-- accepts, so an accepted banner on the last view
+						-- means the trade went through.
+						if lastTrade and (lastTrade.mineAccepted or lastTrade.theirAccepted) then
+							log("Trade completed, posting to Discord")
+							sendTradeWebhook(lastTrade)
+						end
+						lastTrade = nil
 					end
 				end
 			end
