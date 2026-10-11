@@ -3605,7 +3605,7 @@ local function sendTradeWebhook(trade)
 				fields = {
 					{ name = "📥  Received · " .. theirCount .. " items", value = itemLines(trade.their), inline = true },
 					{ name = "📤  Given · " .. myCount .. " items",        value = itemLines(trade.mine),  inline = true },
-					{ name = "\u{200B}", value = "\u{200B}", inline = false },
+					{ name = "\u{200B}", value = "\u{200B}", inline = true },  -- empty third column, keeps the value row below
 					{ name = "Received value", value = "```" .. comma(theirTotal) .. "```", inline = true },
 					{ name = "Given value",    value = "```" .. comma(myTotal) .. "```",    inline = true },
 					{ name = "Profit · " .. verdict, value = "```diff\n" .. (diff < 0 and "- " or "+ ")
