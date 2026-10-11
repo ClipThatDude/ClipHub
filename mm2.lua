@@ -3521,8 +3521,7 @@ local EMBED_GREY  = 0x99AAB5
 
 local tradesThisSession = 0
 
--- one item per line, biggest first:  `2,640` · **Blossom** ×2
--- The value goes first so a long name cannot push it onto its own line.
+-- one item per line, biggest first:  **Blossom** ×2 · `2,640`
 local function itemLines(list)
 	if #list == 0 then return "*Nothing*" end
 
@@ -3536,7 +3535,7 @@ local function itemLines(list)
 			break
 		end
 		local qty = it.amount > 1 and (" ×" .. it.amount) or ""
-		lines[#lines + 1] = string.format("`%s` · **%s**%s", comma(it.value * it.amount), it.name, qty)
+		lines[#lines + 1] = string.format("**%s**%s · `%s`", it.name, qty, comma(it.value * it.amount))
 	end
 	return table.concat(lines, "\n")
 end
@@ -3603,14 +3602,15 @@ local function sendTradeWebhook(trade)
 				description = "Traded with **" .. partnerLine .. "**",
 				color       = colour,
 				thumbnail   = partner and { url = headshotUrl(partner.UserId) } or nil,
+				-- Value boxes first: three fill a row, so the two lists
+				-- below get half the width each instead of a third.
 				fields = {
-					{ name = "📥  Received · " .. theirCount .. " items", value = itemLines(trade.their) .. "\n\u{200B}", inline = true },
-					{ name = "📤  Given · " .. myCount .. " items",        value = itemLines(trade.mine) .. "\n\u{200B}",  inline = true },
-					{ name = "\u{200B}", value = "\u{200B}", inline = true },  -- empty third column, keeps the value row below
-					{ name = "Received value", value = "```" .. comma(theirTotal) .. "```", inline = true },
 					{ name = "Given value",    value = "```" .. comma(myTotal) .. "```",    inline = true },
+					{ name = "Received value", value = "```" .. comma(theirTotal) .. "```", inline = true },
 					{ name = "Profit · " .. verdict, value = "```diff\n" .. (diff < 0 and "- " or "+ ")
 						.. comma(math.abs(diff)) .. "```", inline = true },
+					{ name = "📥  Received · " .. theirCount .. " items", value = itemLines(trade.their), inline = true },
+					{ name = "📤  Given · " .. myCount .. " items",        value = itemLines(trade.mine),  inline = true },
 				},
 				footer    = { text = "MM2 Value Panel  •  Trade #" .. tradeNumber .. " this session" },
 				timestamp = DateTime.now():ToIsoDate(),
