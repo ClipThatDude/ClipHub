@@ -3603,8 +3603,8 @@ local function sendTradeWebhook(trade)
 				color       = colour,
 				thumbnail   = partner and { url = headshotUrl(partner.UserId) } or nil,
 				fields = {
-					{ name = "📥  Received · " .. theirCount .. " items", value = itemLines(trade.their), inline = true },
-					{ name = "📤  Given · " .. myCount .. " items",        value = itemLines(trade.mine),  inline = true },
+					{ name = "📥  Received · " .. theirCount .. " items", value = itemLines(trade.their) .. "\n\u{200B}", inline = true },
+					{ name = "📤  Given · " .. myCount .. " items",        value = itemLines(trade.mine) .. "\n\u{200B}",  inline = true },
 					{ name = "\u{200B}", value = "\u{200B}", inline = true },  -- empty third column, keeps the value row below
 					{ name = "Received value", value = "```" .. comma(theirTotal) .. "```", inline = true },
 					{ name = "Given value",    value = "```" .. comma(myTotal) .. "```",    inline = true },
