@@ -699,11 +699,14 @@ local C = {
 --   paused      STOP / START: accepting requests, auto fill, auto accept
 --   autoFill    FILL ON / OFF: putting items on your side
 --   autoAccept  ACCEPT ON / OFF: pressing ACCEPT in the trade window
+--   mode        MODE VALUE / $: what auto fill and profit are measured in;
+--               both are always shown
 -- onResume is filled in by the trade watcher.
 local bot = {
 	paused     = false,
 	autoFill   = true,
 	autoAccept = true,
+	mode       = "value",
 	rearm      = false,
 	onResume   = nil,
 }
@@ -712,6 +715,9 @@ local bot = {
 -- VALUE INDEX
 -- ===================================================================
 local lookup, catOf, displayOf, sortedItems, itemCount = {}, {}, {}, {}, 0
+
+-- dollar price per item, from the "usd" table in values.json
+local usdLookup = {}
 
 -- The game and the value site spell the same item differently:
 -- "Snow Dagger" / "SnowDagger", "Chroma Darkbringer" / "BeachyChroma".
@@ -722,6 +728,11 @@ end
 
 local function buildIndex()
 	lookup, catOf, displayOf, sortedItems, itemCount = {}, {}, {}, {}, 0
+	usdLookup = {}
+
+	for name, usd in pairs(DATA.usd or {}) do
+		usdLookup[squash(name)] = tonumber(usd)
+	end
 
 	for name, value in pairs(DATA.values) do
 		local category = DATA.cats[name] or "Godly"
@@ -743,6 +754,7 @@ local function buildIndex()
 			lookup[squash(alias)]    = value
 			catOf[squash(alias)]     = DATA.cats[target] or "Godly"
 			displayOf[squash(alias)] = target
+			usdLookup[squash(alias)] = usdLookup[squash(target)]
 		end
 	end
 
@@ -909,6 +921,12 @@ local function valueOf(name)
 	return lookup[key], category
 end
 
+-- 0 when the item has no dollar price
+local function usdOf(name)
+	local key = resolveTiered(name)
+	return key and usdLookup[key] or 0
+end
+
 local function comma(n)
 	local s = tostring(math.floor(tonumber(n) or 0))
 	while true do
@@ -917,6 +935,14 @@ local function comma(n)
 		if k == 0 then break end
 	end
 	return s
+end
+
+-- $1,234.50
+local function money(n)
+	n = tonumber(n) or 0
+	local cents = math.floor(math.abs(n) * 100 + 0.5)
+	return (n < 0 and "-$" or "$") .. comma(math.floor(cents / 100))
+		.. string.format(".%02d", cents % 100)
 end
 
 local dataStamp = "built in"
@@ -943,6 +969,7 @@ local function applyData(fetched, stamp)
 		values  = fetched.values,
 		cats    = (type(fetched.cats) == "table") and fetched.cats or {},
 		aliases = (type(fetched.aliases) == "table") and fetched.aliases or {},
+		usd     = (type(fetched.usd) == "table") and fetched.usd or {},
 	}
 
 	buildIndex()
@@ -1893,6 +1920,7 @@ local function readTrade(includeVisuals)
 				name     = name,
 				amount   = count and count.amount or 1,
 				value    = value,
+				usd      = usdOf(label),
 				category = category or "Godly",
 				visual   = visual,
 			}
@@ -1909,6 +1937,14 @@ local function readTrade(includeVisuals)
 		mine = mine, their = their, partner = partner,
 		mineAccepted = mineAccepted, theirAccepted = theirAccepted,
 	}
+end
+
+local function usdSumOf(list)
+	local total = 0
+	for _, it in ipairs(list) do
+		total = total + (it.usd or 0) * it.amount
+	end
+	return total
 end
 
 local function sumOf(list)
@@ -2665,22 +2701,24 @@ local function buildPanel()
 
 	-- Watching and the icon mode were buttons that only ever sat on one
 	-- setting, so they are just that setting now.
-	-- four buttons across the 519 px row
+	-- five buttons across the 519 px row
 	local function rowButton(name, text, index, colour)
 		return button(pageTrade, name, text,
-			UDim2.fromOffset(26 + (index - 1) * 132, 396), UDim2.fromOffset(123, 30), colour)
+			UDim2.fromOffset(26 + (index - 1) * 105, 396), UDim2.fromOffset(97, 30), colour)
 	end
 
 	local tradeCopyBtn   = rowButton("TradeCopy",   "COPY",   1, C.blue)
 	local tradeFillBtn   = rowButton("TradeFill",   "FILL",   2)
 	local tradeAcceptBtn = rowButton("TradeAccept", "ACCEPT", 3)
-	local tradeStopBtn   = rowButton("TradeStop",   "STOP",   4)
+	local tradeModeBtn   = rowButton("TradeMode",   "MODE",   4, C.blue)
+	local tradeStopBtn   = rowButton("TradeStop",   "STOP",   5)
 
 	local function paintSwitches()
 		safeSet(tradeFillBtn, "Text", bot.autoFill and "FILL: ON" or "FILL: OFF")
 		safeSet(tradeFillBtn, "BackgroundColor3", bot.autoFill and C.green or C.neutral)
 		safeSet(tradeAcceptBtn, "Text", bot.autoAccept and "ACCEPT: ON" or "ACCEPT: OFF")
 		safeSet(tradeAcceptBtn, "BackgroundColor3", bot.autoAccept and C.green or C.neutral)
+		safeSet(tradeModeBtn, "Text", bot.mode == "usd" and "MODE: $" or "MODE: VALUE")
 		safeSet(tradeStopBtn, "Text", bot.paused and "START" or "STOP")
 		safeSet(tradeStopBtn, "BackgroundColor3", bot.paused and C.green or C.red)
 	end
@@ -2703,6 +2741,14 @@ local function buildPanel()
 		paintSwitches()
 		setStatus(bot.autoAccept and "Auto accept on" or "Auto accept off")
 		if bot.autoAccept then resume() end
+	end)
+
+	-- a new measure means a new fill for the open trade
+	tradeModeBtn.MouseButton1Click:Connect(function()
+		bot.mode = (bot.mode == "usd") and "value" or "usd"
+		paintSwitches()
+		setStatus(bot.mode == "usd" and "Trading by $" or "Trading by Value")
+		resume()
 	end)
 
 	tradeStopBtn.MouseButton1Click:Connect(function()
@@ -2734,9 +2780,8 @@ local function buildPanel()
 		showVisual(slot, item.visual, item.name)
 
 		safeSet(slot.amount, "Text", item.amount > 1 and ("x" .. item.amount) or "")
-		safeSet(slot.value, "Text", item.amount > 1
-			and (comma(item.value * item.amount) .. "   " .. comma(item.value) .. " ea")
-			or comma(item.value))
+		safeSet(slot.value, "Text", comma(item.value * item.amount)
+			.. "  ·  " .. money((item.usd or 0) * item.amount))
 		slot.value.TextColor3 = C.greenTxt
 		slot.valueBar.BackgroundTransparency = item.visual and 0.45 or 1
 		safeSet(slot.name, "Text", item.name)
@@ -2753,10 +2798,13 @@ local function buildPanel()
 		end)
 
 		local total, pieces = sumOf(list)
+		local usdTotal = usdSumOf(list)
 
 		safeSet(side.head, "Text", title)
 		safeSet(side.sum, "Text", tint(DIM_COLOR_HEX, pieces .. " items  ·  ")
-			.. tint(VALUE_COLOR_HEX, bold(comma(total) .. " Value")))
+			.. tint(VALUE_COLOR_HEX, bold(comma(total) .. " Value"))
+			.. tint(DIM_COLOR_HEX, "  ·  ")
+			.. tint(TOTAL_COLOR_HEX, bold(money(usdTotal))))
 
 		for i = 1, SLOT_COUNT do
 			local slot = side.slots[i]
@@ -2765,17 +2813,18 @@ local function buildPanel()
 				fillSlot(slot, list[i])
 			elseif list[i] then
 				-- more items than boxes: roll the rest into the last one
-				local rest, restValue = 0, 0
+				local rest, restValue, restUsd = 0, 0, 0
 				for j = SLOT_COUNT, #list do
 					rest = rest + list[j].amount
 					restValue = restValue + list[j].value * list[j].amount
+					restUsd = restUsd + (list[j].usd or 0) * list[j].amount
 				end
 				fillSlot(slot, {
 					name = "+" .. (#list - SLOT_COUNT + 1) .. " more",
 					amount = rest, value = math.floor(restValue / math.max(rest, 1)),
 					category = "Other",
 				})
-				safeSet(slot.value, "Text", comma(restValue))
+				safeSet(slot.value, "Text", comma(restValue) .. "  ·  " .. money(restUsd))
 			else
 				clearSlot(slot)
 			end
@@ -2794,7 +2843,7 @@ local function buildPanel()
 
 			for _, side in ipairs({ theirSide, mySide }) do
 				for i = 1, SLOT_COUNT do clearSlot(side.slots[i]) end
-				safeSet(side.sum, "Text", tint(DIM_COLOR_HEX, "0 items  ·  0 Value"))
+				safeSet(side.sum, "Text", tint(DIM_COLOR_HEX, "0 items  ·  0 Value  ·  $0.00"))
 				safeSet(side.banner, "Visible", false)
 			end
 
@@ -2816,15 +2865,20 @@ local function buildPanel()
 			"THEIR OFFER" .. (trade.partner and ("   (" .. trade.partner .. ")") or ""))
 		local myTotal = paintSide(mySide, trade.mine, "YOUR OFFER")
 
-		local diff = theirTotal - myTotal
-		local hex  = (diff > 0 and TOTAL_COLOR_HEX) or (diff < 0 and "#FF6B6B") or DIM_COLOR_HEX
+		local theirUsd, myUsd = usdSumOf(trade.their), usdSumOf(trade.mine)
+		local diff, usdDiff = theirTotal - myTotal, theirUsd - myUsd
+
+		-- the colour follows whichever the trades are judged by
+		local judged = (bot.mode == "usd") and usdDiff or diff
+		local hex  = (judged > 0 and TOTAL_COLOR_HEX) or (judged < 0 and "#FF6B6B") or DIM_COLOR_HEX
 		local sign = (diff > 0 and "+") or ""
+		local usdSign = (usdDiff > 0 and "+") or ""
 
 		safeSet(ui.tradeWho, "Text", trade.partner
 			and ("Trading with " .. trade.partner) or "Trade open")
-		safeSet(ui.tradeSub, "Text", string.format("They offer %s  ·  you offer %s",
-			comma(theirTotal), comma(myTotal)))
-		safeSet(ui.tradeDiff, "Text", tint(hex, bold(sign .. comma(diff))))
+		safeSet(ui.tradeSub, "Text", string.format("They offer %s (%s)  ·  you offer %s (%s)",
+			comma(theirTotal), money(theirUsd), comma(myTotal), money(myUsd)))
+		safeSet(ui.tradeDiff, "Text", tint(hex, bold(sign .. comma(diff) .. "  ·  " .. usdSign .. money(usdDiff))))
 
 		----------------------------------------------------------
 		-- clipboard copy, still plain text
@@ -2833,14 +2887,16 @@ local function buildPanel()
 
 		local function block(title, list)
 			local total, pieces = sumOf(list)
-			table.insert(copy, string.format("%s  (%d items, %s Value)", title, pieces, comma(total)))
+			table.insert(copy, string.format("%s  (%d items, %s Value, %s)", title, pieces,
+				comma(total), money(usdSumOf(list))))
 			if #list == 0 then
 				table.insert(copy, "   empty")
 			else
 				for _, it in ipairs(list) do
-					table.insert(copy, string.format("   %s %s %s",
+					table.insert(copy, string.format("   %s %s %s %s",
 						pad(it.amount .. "x", 4), pad(it.name, 22),
-						pad(comma(it.value * it.amount), 10, true)))
+						pad(comma(it.value * it.amount), 10, true),
+						pad(money((it.usd or 0) * it.amount), 10, true)))
 				end
 			end
 		end
@@ -2850,8 +2906,9 @@ local function buildPanel()
 		table.insert(copy, "")
 		block("THEIR OFFER" .. (trade.partner and ("  (" .. trade.partner .. ")") or ""), trade.their)
 		table.insert(copy, "")
-		table.insert(copy, string.format("%s%s Value %s",
-			sign, comma(diff), diff >= 0 and "in your favour" or "against you"))
+		table.insert(copy, string.format("%s%s Value  ·  %s%s  %s",
+			sign, comma(diff), usdSign, money(usdDiff),
+			judged >= 0 and "in your favour" or "against you"))
 
 		local head = (COPY_STYLE == "ansi" and "```ansi\n")
 			or (COPY_STYLE == "code" and "```\n") or ""
@@ -3597,7 +3654,8 @@ local function itemLines(list)
 			break
 		end
 		local qty = it.amount > 1 and (" ×" .. it.amount) or ""
-		lines[#lines + 1] = string.format("**%s**%s · `%s`", it.name, qty, comma(it.value * it.amount))
+		lines[#lines + 1] = string.format("**%s**%s · `%s` · `%s`", it.name, qty,
+			comma(it.value * it.amount), money((it.usd or 0) * it.amount))
 	end
 	return table.concat(lines, "\n")
 end
@@ -3635,13 +3693,26 @@ local function sendTradeWebhook(trade)
 
 	local theirTotal, theirCount = sumOf(trade.their)
 	local myTotal, myCount       = sumOf(trade.mine)
-	local diff = theirTotal - myTotal
+	local theirUsd, myUsd        = usdSumOf(trade.their), usdSumOf(trade.mine)
+	local diff, usdDiff          = theirTotal - myTotal, theirUsd - myUsd
+
+	-- win or loss goes by whichever MODE the trade was made in
+	local inUsd  = bot.mode == "usd"
+	local judged = inUsd and usdDiff or diff
 
 	local colour, verdict = EMBED_GREY, "Even"
-	if diff > 0 then
+	if judged > 0 then
 		colour, verdict = EMBED_GREEN, "Win"
-	elseif diff < 0 then
+	elseif judged < 0 then
 		colour, verdict = EMBED_RED, "Loss"
+	end
+
+	-- one box, two lines: Value on top, $ below
+	local function box(value, usd)
+		return "```" .. comma(value) .. "\n" .. money(usd) .. "```"
+	end
+	local function signedLine(text, n)
+		return (n < 0 and "- " or "+ ") .. text
 	end
 
 	-- the HTTP calls run off the trade loop
@@ -3667,14 +3738,16 @@ local function sendTradeWebhook(trade)
 				-- Value boxes first: three fill a row, so the two lists
 				-- below get half the width each instead of a third.
 				fields = {
-					{ name = "Given value",    value = "```" .. comma(myTotal) .. "```",    inline = true },
-					{ name = "Received value", value = "```" .. comma(theirTotal) .. "```", inline = true },
-					{ name = "Profit · " .. verdict, value = "```diff\n" .. (diff < 0 and "- " or "+ ")
-						.. comma(math.abs(diff)) .. "```", inline = true },
+					{ name = "Given value",    value = box(myTotal, myUsd),       inline = true },
+					{ name = "Received value", value = box(theirTotal, theirUsd), inline = true },
+					{ name = "Profit · " .. verdict, value = "```diff\n"
+						.. signedLine(comma(math.abs(diff)), diff) .. "\n"
+						.. signedLine(money(math.abs(usdDiff)), usdDiff) .. "```", inline = true },
 					{ name = "📥  Received · " .. theirCount .. " items", value = itemLines(trade.their), inline = true },
 					{ name = "📤  Given · " .. myCount .. " items",        value = itemLines(trade.mine),  inline = true },
 				},
-				footer    = { text = "MM2 Value Panel  •  Trade #" .. tradeNumber .. " this session" },
+				footer    = { text = "MM2 Value Panel  •  Trade #" .. tradeNumber .. " this session  •  Mode: "
+					.. (inUsd and "$" or "Value") },
 				timestamp = DateTime.now():ToIsoDate(),
 			} },
 		})
@@ -3734,8 +3807,9 @@ end
 -- Items go in and out through MM2's Trade/OfferItem and
 -- Trade/RemoveOffer remotes, one unit per call.
 -- ===================================================================
--- the least each trade has to make you
-local FILL_MIN_PROFIT = 50
+-- the least each trade has to make you, in the measure MODE is set to
+local FILL_MIN_PROFIT     = 50     -- Value
+local FILL_MIN_PROFIT_USD = 0.50   -- $
 
 -- most different items one side of a trade can hold
 local FILL_MAX_TYPES = 4
@@ -3779,7 +3853,7 @@ local function offerableItems()
 					if value > 0 then
 						table.insert(items, {
 							raw = raw, branch = branch, name = displayName(raw),
-							value = value, amount = amount,
+							value = value, usd = usdOf(raw), amount = amount,
 						})
 					end
 				end
@@ -3792,8 +3866,8 @@ end
 -- The biggest total that leaves at least FILL_MIN_PROFIT, using at most
 -- FILL_MAX_TYPES different items. Depth-first over items sorted by value,
 -- trying the largest few quantities of each; stops early on an exact hit.
-local function planOffer(items, target)
-	local limit = target - FILL_MIN_PROFIT
+local function planOffer(items, target, minProfit)
+	local limit = target - minProfit
 	if limit <= 0 then return {}, 0 end
 
 	local pool = {}
@@ -3868,7 +3942,15 @@ local function applyPlan(plan)
 	end
 end
 
-local function fillFor(target)
+-- The search works in whole numbers, so $ mode counts in cents.
+local function cents(usd)
+	return math.floor(usd * 100 + 0.5)
+end
+
+local function fillFor(their)
+	local inUsd  = bot.mode == "usd"
+	local target = inUsd and cents(usdSumOf(their)) or sumOf(their)
+
 	if target <= 0 then
 		applyPlan({})
 		log("Auto fill: their side is empty, your side cleared")
@@ -3881,21 +3963,37 @@ local function fillFor(target)
 		return
 	end
 
-	local plan, total = planOffer(items, target)
+	-- the same items, measured the way MODE says
+	local pool = {}
+	for _, it in ipairs(items) do
+		local measure = inUsd and cents(it.usd) or it.value
+		if measure > 0 then
+			table.insert(pool, {
+				raw = it.raw, branch = it.branch, name = it.name,
+				amount = it.amount, value = measure,
+			})
+		end
+	end
+
+	local minProfit = inUsd and cents(FILL_MIN_PROFIT_USD) or FILL_MIN_PROFIT
+	local plan, total = planOffer(pool, target, minProfit)
 	applyPlan(plan)
 
 	local parts = {}
 	for _, p in ipairs(plan) do
 		parts[#parts + 1] = p.qty .. "x " .. p.item.name
 	end
-	log(string.format("Auto fill: they %s, you %s  (%s)", comma(target), comma(total),
+	local shown = inUsd and money or comma
+	local scale = inUsd and 100 or 1
+	log(string.format("Auto fill: they %s, you %s  (%s)",
+		shown(target / scale), shown(total / scale),
 		#parts > 0 and table.concat(parts, ", ") or "nothing fits"))
 end
 
 local fillToken = 0
 
 -- called by the trade watcher whenever their side changes
-local function scheduleFill(target)
+local function scheduleFill(their)
 	if not bot.autoFill or bot.paused then return end
 
 	fillToken = fillToken + 1
@@ -3908,7 +4006,7 @@ local function scheduleFill(target)
 			autoFill.busy = false
 			return
 		end
-		local ok, err = pcall(fillFor, target)
+		local ok, err = pcall(fillFor, their)
 		if not ok then log("Auto fill failed: " .. tostring(err)) end
 		if token == fillToken then autoFill.busy = false end
 	end)
@@ -3992,7 +4090,7 @@ task.spawn(function()
 						local theirKey = table.concat(parts, "|")
 						if theirKey ~= lastTheirKey then
 							lastTheirKey = theirKey
-							scheduleFill(sumOf(trade.their))
+							scheduleFill(trade.their)
 						end
 						local theirTotal = sumOf(trade.their)
 						local myTotal    = sumOf(trade.mine)
