@@ -695,6 +695,11 @@ local C = {
 	neutral  = Color3.fromRGB(45, 48, 58),
 }
 
+-- One switch for everything that acts on its own: accepting requests,
+-- auto fill and auto accept. The STOP button on the Trade page flips
+-- it; onResume is filled in by the trade watcher.
+local bot = { paused = false, rearm = false, onResume = nil }
+
 -- ===================================================================
 -- VALUE INDEX
 -- ===================================================================
@@ -2655,6 +2660,27 @@ local function buildPanel()
 	local tradeCopyBtn = button(pageTrade, "TradeCopy", "COPY",
 		UDim2.fromOffset(26, 396), UDim2.fromOffset(160, 30), C.blue)
 
+	local tradeStopBtn = button(pageTrade, "TradeStop", "STOP",
+		UDim2.fromOffset(196, 396), UDim2.fromOffset(160, 30), C.red)
+
+	local function paintStop()
+		safeSet(tradeStopBtn, "Text", bot.paused and "START" or "STOP")
+		safeSet(tradeStopBtn, "BackgroundColor3", bot.paused and C.green or C.red)
+	end
+	paintStop()
+
+	tradeStopBtn.MouseButton1Click:Connect(function()
+		bot.paused = not bot.paused
+		paintStop()
+
+		if bot.paused then
+			setStatus("Bot stopped")
+		else
+			setStatus("Bot running")
+			if bot.onResume then task.spawn(bot.onResume) end
+		end
+	end)
+
 	----------------------------------------------------------------
 	-- TRADE RENDERING
 	----------------------------------------------------------------
@@ -3841,7 +3867,7 @@ local fillToken = 0
 
 -- called by the trade watcher whenever their side changes
 local function scheduleFill(target)
-	if not AUTO_FILL then return end
+	if not AUTO_FILL or bot.paused then return end
 
 	fillToken = fillToken + 1
 	local token = fillToken
@@ -3849,6 +3875,10 @@ local function scheduleFill(target)
 
 	task.delay(FILL_DEBOUNCE, function()
 		if token ~= fillToken then return end
+		if bot.paused then
+			autoFill.busy = false
+			return
+		end
 		local ok, err = pcall(fillFor, target)
 		if not ok then log("Auto fill failed: " .. tostring(err)) end
 		if token == fillToken then autoFill.busy = false end
@@ -3879,6 +3909,15 @@ task.spawn(function()
 	-- their side as last filled against, so your own additions do not
 	-- set off another fill
 	local lastTheirKey = nil
+
+	-- START again: look at the trade as it is now. Forgetting the last
+	-- signature makes the next poll treat an open trade as changed, so
+	-- your side is filled against whatever they have on it by then.
+	bot.onResume = function()
+		lastTheirKey = nil
+		if lastSignature ~= "none" then lastSignature = "resume" end
+		bot.rearm = true
+	end
 
 	while true do
 		task.wait(wait)
@@ -4091,6 +4130,8 @@ task.spawn(function()
 	while true do
 		task.wait(1)
 		local ok, err = pcall(function()
+			if bot.paused then return end
+
 			local req
 			for _, obj in ipairs(PlayerGui:GetDescendants()) do
 				if obj.Name == "ReceivingRequest" and obj:IsA("GuiObject") and isShown(obj) then
@@ -4119,10 +4160,22 @@ task.spawn(function()
 	while true do
 		task.wait(1)
 		local ok, err = pcall(function()
+			if bot.paused then
+				armed = false
+				return
+			end
+
 			-- auto fill is still changing your side
 			if autoFill.busy then
 				armed = false
 				return
+			end
+
+			-- after START the countdown may already be over, so do not
+			-- wait for one that is not coming
+			if bot.rearm then
+				bot.rearm = false
+				armed = true
 			end
 
 			if countdownVisible() then
