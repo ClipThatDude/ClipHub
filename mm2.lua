@@ -695,10 +695,18 @@ local C = {
 	neutral  = Color3.fromRGB(45, 48, 58),
 }
 
--- One switch for everything that acts on its own: accepting requests,
--- auto fill and auto accept. The STOP button on the Trade page flips
--- it; onResume is filled in by the trade watcher.
-local bot = { paused = false, rearm = false, onResume = nil }
+-- Switches for everything that acts on its own, all on the Trade page.
+--   paused      STOP / START: accepting requests, auto fill, auto accept
+--   autoFill    FILL ON / OFF: putting items on your side
+--   autoAccept  ACCEPT ON / OFF: pressing ACCEPT in the trade window
+-- onResume is filled in by the trade watcher.
+local bot = {
+	paused     = false,
+	autoFill   = true,
+	autoAccept = true,
+	rearm      = false,
+	onResume   = nil,
+}
 
 -- ===================================================================
 -- VALUE INDEX
@@ -2657,28 +2665,51 @@ local function buildPanel()
 
 	-- Watching and the icon mode were buttons that only ever sat on one
 	-- setting, so they are just that setting now.
-	local tradeCopyBtn = button(pageTrade, "TradeCopy", "COPY",
-		UDim2.fromOffset(26, 396), UDim2.fromOffset(160, 30), C.blue)
+	-- four buttons across the 519 px row
+	local function rowButton(name, text, index, colour)
+		return button(pageTrade, name, text,
+			UDim2.fromOffset(26 + (index - 1) * 132, 396), UDim2.fromOffset(123, 30), colour)
+	end
 
-	local tradeStopBtn = button(pageTrade, "TradeStop", "STOP",
-		UDim2.fromOffset(196, 396), UDim2.fromOffset(160, 30), C.red)
+	local tradeCopyBtn   = rowButton("TradeCopy",   "COPY",   1, C.blue)
+	local tradeFillBtn   = rowButton("TradeFill",   "FILL",   2)
+	local tradeAcceptBtn = rowButton("TradeAccept", "ACCEPT", 3)
+	local tradeStopBtn   = rowButton("TradeStop",   "STOP",   4)
 
-	local function paintStop()
+	local function paintSwitches()
+		safeSet(tradeFillBtn, "Text", bot.autoFill and "FILL: ON" or "FILL: OFF")
+		safeSet(tradeFillBtn, "BackgroundColor3", bot.autoFill and C.green or C.neutral)
+		safeSet(tradeAcceptBtn, "Text", bot.autoAccept and "ACCEPT: ON" or "ACCEPT: OFF")
+		safeSet(tradeAcceptBtn, "BackgroundColor3", bot.autoAccept and C.green or C.neutral)
 		safeSet(tradeStopBtn, "Text", bot.paused and "START" or "STOP")
 		safeSet(tradeStopBtn, "BackgroundColor3", bot.paused and C.green or C.red)
 	end
-	paintStop()
+	paintSwitches()
+
+	-- switching something back on picks up the trade as it is now
+	local function resume()
+		if not bot.paused and bot.onResume then task.spawn(bot.onResume) end
+	end
+
+	tradeFillBtn.MouseButton1Click:Connect(function()
+		bot.autoFill = not bot.autoFill
+		paintSwitches()
+		setStatus(bot.autoFill and "Auto fill on" or "Auto fill off")
+		if bot.autoFill then resume() end
+	end)
+
+	tradeAcceptBtn.MouseButton1Click:Connect(function()
+		bot.autoAccept = not bot.autoAccept
+		paintSwitches()
+		setStatus(bot.autoAccept and "Auto accept on" or "Auto accept off")
+		if bot.autoAccept then resume() end
+	end)
 
 	tradeStopBtn.MouseButton1Click:Connect(function()
 		bot.paused = not bot.paused
-		paintStop()
-
-		if bot.paused then
-			setStatus("Bot stopped")
-		else
-			setStatus("Bot running")
-			if bot.onResume then task.spawn(bot.onResume) end
-		end
+		paintSwitches()
+		setStatus(bot.paused and "Bot stopped" or "Bot running")
+		resume()
 	end)
 
 	----------------------------------------------------------------
@@ -3703,8 +3734,6 @@ end
 -- Items go in and out through MM2's Trade/OfferItem and
 -- Trade/RemoveOffer remotes, one unit per call.
 -- ===================================================================
-local AUTO_FILL = true
-
 -- the least each trade has to make you
 local FILL_MIN_PROFIT = 50
 
@@ -3867,7 +3896,7 @@ local fillToken = 0
 
 -- called by the trade watcher whenever their side changes
 local function scheduleFill(target)
-	if not AUTO_FILL or bot.paused then return end
+	if not bot.autoFill or bot.paused then return end
 
 	fillToken = fillToken + 1
 	local token = fillToken
@@ -3875,7 +3904,7 @@ local function scheduleFill(target)
 
 	task.delay(FILL_DEBOUNCE, function()
 		if token ~= fillToken then return end
-		if bot.paused then
+		if bot.paused or not bot.autoFill then
 			autoFill.busy = false
 			return
 		end
@@ -4160,7 +4189,7 @@ task.spawn(function()
 	while true do
 		task.wait(1)
 		local ok, err = pcall(function()
-			if bot.paused then
+			if bot.paused or not bot.autoAccept then
 				armed = false
 				return
 			end
