@@ -3671,13 +3671,16 @@ end
 -- AUTO FILL
 --
 -- When the other side changes their offer, fills your side with the
--- items whose total comes as close to theirs as possible while staying
--- below it: they offer 1,500, you offer up to 1,499.
+-- items whose total comes as close to theirs as possible while keeping
+-- at least FILL_MIN_PROFIT for you: they offer 1,500, you offer up to 1,450.
 --
 -- Items go in and out through MM2's Trade/OfferItem and
 -- Trade/RemoveOffer remotes, one unit per call.
 -- ===================================================================
 local AUTO_FILL = true
+
+-- the least each trade has to make you
+local FILL_MIN_PROFIT = 50
 
 -- most different items one side of a trade can hold
 local FILL_MAX_TYPES = 4
@@ -3731,11 +3734,11 @@ local function offerableItems()
 	return items
 end
 
--- The biggest total strictly below target, using at most FILL_MAX_TYPES
--- different items. Depth-first over items sorted by value, trying the
--- largest few quantities of each; stops early on an exact target - 1.
+-- The biggest total that leaves at least FILL_MIN_PROFIT, using at most
+-- FILL_MAX_TYPES different items. Depth-first over items sorted by value,
+-- trying the largest few quantities of each; stops early on an exact hit.
 local function planOffer(items, target)
-	local limit = target - 1
+	local limit = target - FILL_MIN_PROFIT
 	if limit <= 0 then return {}, 0 end
 
 	local pool = {}
