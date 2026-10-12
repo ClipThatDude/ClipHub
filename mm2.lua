@@ -1811,6 +1811,51 @@ local function commonAncestor(a, b)
 	return nil
 end
 
+-- MM2 colours the name strip of a trade card by rarity. Hue ranges
+-- rather than exact colours, so a shade change in an update still
+-- lands in the right bucket; a grey or see-through strip says nothing.
+local function cardTier(obj)
+	local node = obj
+	for _ = 1, 3 do
+		if not node or not node:IsA("GuiObject") then break end
+
+		if node.BackgroundTransparency < 0.9 then
+			local h, sat, v = node.BackgroundColor3:ToHSV()
+			if sat >= 0.35 and v >= 0.3 then
+				if h < 0.03 or h >= 0.97 then return "Legendary" end
+				if h < 0.11 then return "Unique" end
+				if h < 0.20 then return "Vintage" end
+				if h < 0.45 then return "Uncommon" end
+				if h < 0.70 then return "Rare" end
+				if h < 0.82 then return "Ancient" end
+				return "Godly"
+			end
+		end
+
+		node = node.Parent
+	end
+	return nil
+end
+
+-- does a value-list category belong to the rarity the card shows?
+local function tierMatches(tier, category)
+	if tier == "Godly" then return category == "Godly" or category == "Chroma" end
+	return tier == category
+end
+
+-- The same printed name in the rarity the card shows, if the list has
+-- one: "Laser" on a Vintage card is the "Laser|Rare" entry.
+local function sameNameInTier(text, tier)
+	for name in pairs(DATA.values) do
+		local shown = name:match("^(.-)|") or name
+		if shown == text and tierMatches(tier, DATA.cats[name] or "Godly") then
+			local value, category = valueOf(name)
+			if value > 0 then return value, category, name end
+		end
+	end
+	return 0, nil, nil
+end
+
 -- returns nil when no trade is open
 local function readTrade(includeVisuals)
 	local yours, theirs = findAnchors()
@@ -1901,6 +1946,16 @@ local function readTrade(includeVisuals)
 
 		if value == 0 then
 			value, category = valueOf(entry.text)
+		end
+
+		-- MM2 reuses names across rarities: a Legendary Shadow is not
+		-- the Vintage Shadow on the list. The card colour says which one
+		-- this is, and a price from another rarity is not used.
+		local tier = cardTier(entry.obj)
+		if value > 0 and tier and not tierMatches(tier, category) then
+			local alt, altCategory, altName = sameNameInTier(entry.text, tier)
+			value, category = alt, altCategory
+			if altName then label = altName end
 		end
 
 		if value > 0 then
