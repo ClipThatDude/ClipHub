@@ -16,6 +16,11 @@
   -----------
   Accepts every incoming trade request and presses ACCEPT in the
   trade window once MM2's countdown ends. No whitelist.
+
+  Auto fill
+  ---------
+  Fills your side with the items that come closest to their offer
+  while staying below it.
 ===================================================================
 ]]
 
@@ -3663,6 +3668,197 @@ local function sameCounts(a, b)
 end
 
 -- ===================================================================
+-- AUTO FILL
+--
+-- When the other side changes their offer, fills your side with the
+-- items whose total comes as close to theirs as possible while staying
+-- below it: they offer 1,500, you offer up to 1,499.
+--
+-- Items go in and out through MM2's Trade/OfferItem and
+-- Trade/RemoveOffer remotes, one unit per call.
+-- ===================================================================
+local AUTO_FILL = true
+
+-- most different items one side of a trade can hold
+local FILL_MAX_TYPES = 4
+
+-- inventory branches that can be traded
+local FILL_BRANCHES = { "Weapons", "Pets" }
+
+-- wait this long after their last change before filling, so a run of
+-- quick additions is answered once
+local FILL_DEBOUNCE = 1.5
+
+-- how many combinations the search may try before taking its best so far
+local FILL_SEARCH_BUDGET = 200000
+
+-- the accept loop holds off while this is true
+local autoFill = { busy = false }
+
+local function tradeRemote(name)
+	local folder = ReplicatedStorage:FindFirstChild("Trade")
+	return folder and folder:FindFirstChild(name)
+end
+
+-- your items that have a value, with the branch OfferItem needs
+local function offerableItems()
+	local remote = resolveRemote()
+	if not remote then return nil end
+
+	local status, data = invokeWithTimeout(remote, LocalPlayer)
+	if status ~= "ok" or typeof(data) ~= "table" then return nil end
+
+	local items = {}
+	for _, branch in ipairs(FILL_BRANCHES) do
+		local node = data[branch]
+		if type(node) == "table" then
+			local owned = (type(node.Owned) == "table") and node.Owned or node
+			for raw, count in pairs(owned) do
+				local amount = tonumber(count)
+				if type(raw) == "string" and amount and amount > 0
+					and not HIDDEN_ITEMS[squash(raw)] then
+					local value = valueOf(raw)
+					if value > 0 then
+						table.insert(items, {
+							raw = raw, branch = branch, name = displayName(raw),
+							value = value, amount = amount,
+						})
+					end
+				end
+			end
+		end
+	end
+	return items
+end
+
+-- The biggest total strictly below target, using at most FILL_MAX_TYPES
+-- different items. Depth-first over items sorted by value, trying the
+-- largest few quantities of each; stops early on an exact target - 1.
+local function planOffer(items, target)
+	local limit = target - 1
+	if limit <= 0 then return {}, 0 end
+
+	local pool = {}
+	for _, it in ipairs(items) do
+		if it.value <= limit then table.insert(pool, it) end
+	end
+	table.sort(pool, function(a, b) return a.value > b.value end)
+
+	local best, bestPick = 0, {}
+	local pick, nodes = {}, 0
+
+	local function search(start, slotsLeft, total)
+		nodes = nodes + 1
+		if nodes % 5000 == 0 then task.wait() end
+
+		if total > best then
+			best, bestPick = total, table.clone(pick)
+		end
+		if best == limit or slotsLeft == 0 or nodes > FILL_SEARCH_BUDGET then return end
+
+		for i = start, #pool do
+			local it = pool[i]
+			local most = math.min(it.amount, math.floor((limit - total) / it.value))
+
+			for qty = most, math.max(1, most - 3), -1 do
+				pick[#pick + 1] = { item = it, qty = qty }
+				search(i + 1, slotsLeft - 1, total + it.value * qty)
+				pick[#pick] = nil
+				if best == limit or nodes > FILL_SEARCH_BUDGET then return end
+			end
+		end
+	end
+
+	search(1, FILL_MAX_TYPES, 0)
+	return bestPick, best
+end
+
+-- what this script has put on your side, raw name -> { item, qty }
+local offered = {}
+
+local function offerOne(it)
+	local remote = tradeRemote("OfferItem")
+	if remote then remote:FireServer(it.raw, it.branch) end
+end
+
+local function removeOne(it)
+	local remote = tradeRemote("RemoveOffer")
+	if remote then remote:FireServer(it.raw, it.branch) end
+end
+
+-- moves your side from what is offered now to the plan, one unit at a time
+local function applyPlan(plan)
+	local want = {}
+	for _, p in ipairs(plan) do want[p.item.raw] = p end
+
+	for raw, have in pairs(offered) do
+		local keep = want[raw] and want[raw].qty or 0
+		for _ = 1, have.qty - keep do
+			removeOne(have.item)
+			task.wait(0.15)
+		end
+		if keep == 0 then offered[raw] = nil else have.qty = math.min(have.qty, keep) end
+	end
+
+	for raw, p in pairs(want) do
+		local have = offered[raw] and offered[raw].qty or 0
+		for _ = 1, p.qty - have do
+			offerOne(p.item)
+			task.wait(0.15)
+		end
+		offered[raw] = { item = p.item, qty = p.qty }
+	end
+end
+
+local function fillFor(target)
+	if target <= 0 then
+		applyPlan({})
+		log("Auto fill: their side is empty, your side cleared")
+		return
+	end
+
+	local items = offerableItems()
+	if not items then
+		log("Auto fill: could not read your inventory")
+		return
+	end
+
+	local plan, total = planOffer(items, target)
+	applyPlan(plan)
+
+	local parts = {}
+	for _, p in ipairs(plan) do
+		parts[#parts + 1] = p.qty .. "x " .. p.item.name
+	end
+	log(string.format("Auto fill: they %s, you %s  (%s)", comma(target), comma(total),
+		#parts > 0 and table.concat(parts, ", ") or "nothing fits"))
+end
+
+local fillToken = 0
+
+-- called by the trade watcher whenever their side changes
+local function scheduleFill(target)
+	if not AUTO_FILL then return end
+
+	fillToken = fillToken + 1
+	local token = fillToken
+	autoFill.busy = true
+
+	task.delay(FILL_DEBOUNCE, function()
+		if token ~= fillToken then return end
+		local ok, err = pcall(fillFor, target)
+		if not ok then log("Auto fill failed: " .. tostring(err)) end
+		if token == fillToken then autoFill.busy = false end
+	end)
+end
+
+local function resetFill()
+	fillToken = fillToken + 1
+	offered = {}
+	autoFill.busy = false
+end
+
+-- ===================================================================
 -- TRADE WATCHER
 -- Polling, not a signal: MM2 rebuilds the trade window every time a
 -- slot changes, so there is nothing stable to connect to. The poll is
@@ -3676,6 +3872,10 @@ task.spawn(function()
 	-- inventory as it was when the current trade opened
 	local beforeCounts = nil
 	local tradeId = 0
+
+	-- their side as last filled against, so your own additions do not
+	-- set off another fill
+	local lastTheirKey = nil
 
 	while true do
 		task.wait(wait)
@@ -3707,6 +3907,22 @@ task.spawn(function()
 
 					if trade then
 						lastTrade = trade
+
+						if opened then
+							resetFill()
+							lastTheirKey = nil
+						end
+
+						local parts = {}
+						for _, it in ipairs(trade.their) do
+							parts[#parts + 1] = it.name .. "x" .. it.amount
+						end
+						table.sort(parts)
+						local theirKey = table.concat(parts, "|")
+						if theirKey ~= lastTheirKey then
+							lastTheirKey = theirKey
+							scheduleFill(sumOf(trade.their))
+						end
 						local theirTotal = sumOf(trade.their)
 						local myTotal    = sumOf(trade.mine)
 
@@ -3737,6 +3953,8 @@ task.spawn(function()
 						-- the window closes, so look a few times.
 						local finished, before = lastTrade, beforeCounts
 						lastTrade, beforeCounts = nil, nil
+						resetFill()
+						lastTheirKey = nil
 
 						if finished and before then
 							task.spawn(function()
@@ -3898,6 +4116,12 @@ task.spawn(function()
 	while true do
 		task.wait(3)
 		local ok, err = pcall(function()
+			-- auto fill is still changing your side
+			if autoFill.busy then
+				armed = false
+				return
+			end
+
 			if countdownVisible() then
 				armed = true
 				return
