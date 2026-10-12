@@ -4112,12 +4112,12 @@ task.spawn(function()
 	end
 end)
 
--- 2) PRESS ACCEPT WHEN THE COUNTDOWN ENDS
+-- 2) PRESS ACCEPT ONCE THE COUNTDOWN HAS ENDED AND THEY HAVE ACCEPTED
 task.spawn(function()
 	local armed = false
 
 	while true do
-		task.wait(3)
+		task.wait(1)
 		local ok, err = pcall(function()
 			-- auto fill is still changing your side
 			if autoFill.busy then
@@ -4130,6 +4130,11 @@ task.spawn(function()
 				return
 			end
 			if not armed then return end
+
+			-- they accept first; until their side shows the green
+			-- accepted bar, keep waiting (armed stays set)
+			local trade = readTrade(false)
+			if not (trade and trade.theirAccepted) then return end
 
 			local textObj = findAcceptText()
 			if not textObj then return end
