@@ -3874,6 +3874,14 @@ local FILL_MIN_PROFIT_USD = 0.50   -- $
 -- most different items one side of a trade can hold
 local FILL_MAX_TYPES = 4
 
+-- Items auto fill spends first. As much of the offer as these can cover
+-- goes in them; only the rest is made up from other items. A 38 dollar
+-- offer becomes 6x Corrupt (36) plus about 1.50 of something else.
+-- Names as the value list writes them.
+local FILL_PRIORITY = {
+	"Corrupt",
+}
+
 -- inventory branches that can be traded
 local FILL_BRANCHES = { "Weapons", "Pets" }
 
@@ -3926,7 +3934,7 @@ end
 -- The biggest total that leaves at least FILL_MIN_PROFIT, using at most
 -- FILL_MAX_TYPES different items. Depth-first over items sorted by value,
 -- trying the largest few quantities of each; stops early on an exact hit.
-local function planOffer(items, target, minProfit)
+local function planOffer(items, target, minProfit, maxTypes)
 	local limit = target - minProfit
 	if limit <= 0 then return {}, 0 end
 
@@ -3961,7 +3969,7 @@ local function planOffer(items, target, minProfit)
 		end
 	end
 
-	search(1, FILL_MAX_TYPES, 0)
+	search(1, maxTypes or FILL_MAX_TYPES, 0)
 	return bestPick, best
 end
 
@@ -4088,7 +4096,26 @@ local function fillFor(their, isCurrent)
 	end
 
 	local minProfit = inUsd and cents(FILL_MIN_PROFIT_USD) or FILL_MIN_PROFIT
-	local plan, total = planOffer(pool, target, minProfit)
+
+	-- priority items first, as much of the offer as they can cover
+	local isPriority = {}
+	for _, name in ipairs(FILL_PRIORITY) do isPriority[squash(name)] = true end
+
+	local first, rest = {}, {}
+	for _, it in ipairs(pool) do
+		table.insert(isPriority[squash(it.name)] and first or rest, it)
+	end
+
+	local plan, total = planOffer(first, target, minProfit)
+
+	-- then the gap that is left, from everything else, in the slots left
+	local slotsLeft = FILL_MAX_TYPES - #plan
+	local room = target - minProfit - total
+	if slotsLeft > 0 and room > 0 then
+		local extra, extraTotal = planOffer(rest, room, 0, slotsLeft)
+		for _, p in ipairs(extra) do table.insert(plan, p) end
+		total = total + extraTotal
+	end
 	local ok, why = applyPlan(plan, items, isCurrent)
 	if ok == "superseded" then return end
 	if not ok then
