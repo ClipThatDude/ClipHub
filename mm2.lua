@@ -21,6 +21,11 @@
   ---------
   Fills your side with the items that come closest to their offer
   while staying below it.
+
+  Anti-AFK
+  --------
+  Roblox kicks after 20 idle minutes. A fake right-click whenever the
+  game reports you idle keeps the panel trading for hours.
 ===================================================================
 ]]
 
@@ -4389,6 +4394,25 @@ task.spawn(function()
 		end)
 		if not ok then log("Auto accept (trade): " .. tostring(err)) end
 	end
+end)
+
+-- ===================================================================
+-- ANTI-AFK
+--
+-- Roblox kicks a player after 20 minutes without input. Idled fires
+-- about two minutes in; a fake right-click at the screen corner counts
+-- as input and starts the count again. Right-click only turns the
+-- camera, so nothing in the game is pressed.
+-- ===================================================================
+pcall(function()
+	local VirtualUser = game:GetService("VirtualUser")
+	LocalPlayer.Idled:Connect(function()
+		pcall(function()
+			VirtualUser:CaptureController()
+			VirtualUser:ClickButton2(Vector2.new())
+		end)
+		log("Anti-AFK: idle kick prevented")
+	end)
 end)
 
 log("Panel ready  ·  " .. comma(itemCount) .. " items loaded")
