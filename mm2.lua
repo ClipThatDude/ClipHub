@@ -3965,8 +3965,9 @@ local function planOffer(items, target, minProfit)
 	return bestPick, best
 end
 
--- what this script has put on your side, raw name -> { item, qty }
-local offered = {}
+-- set when a fill could not move your side where it meant to; no more
+-- fills until this trade closes
+local fillStuck = false
 
 local function offerOne(it)
 	local remote = tradeRemote("OfferItem")
@@ -3978,28 +3979,68 @@ local function removeOne(it)
 	if remote then remote:FireServer(it.raw, it.branch) end
 end
 
--- moves your side from what is offered now to the plan, one unit at a time
-local function applyPlan(plan)
-	local want = {}
-	for _, p in ipairs(plan) do want[p.item.raw] = p end
+-- your side as the trade window shows it, item name -> amount
+local function sideCounts()
+	local ok, trade = pcall(readTrade, false)
+	if not ok or not trade then return nil end
 
-	for raw, have in pairs(offered) do
-		local keep = want[raw] and want[raw].qty or 0
-		for _ = 1, have.qty - keep do
-			removeOne(have.item)
-			task.wait(0.15)
-		end
-		if keep == 0 then offered[raw] = nil else have.qty = math.min(have.qty, keep) end
+	local counts = {}
+	for _, it in ipairs(trade.mine) do
+		counts[it.name] = (counts[it.name] or 0) + it.amount
+	end
+	return counts
+end
+
+-- Moves your side to the plan one unit at a time, reading the window
+-- after every call. It used to keep its own tally of what it had put
+-- in; when a remove did nothing in the game the tally still dropped,
+-- and refill after refill piled items on (66 Corrupt against a 239
+-- dollar offer). Now a call that does not show up on the window stops
+-- the fill instead of being assumed.
+local function applyPlan(plan, items)
+	local want, byName = {}, {}
+	for _, it in ipairs(items or {}) do byName[it.name] = it end
+	for _, p in ipairs(plan) do
+		want[p.item.name] = p.qty
+		byName[p.item.name] = p.item
 	end
 
-	for raw, p in pairs(want) do
-		local have = offered[raw] and offered[raw].qty or 0
-		for _ = 1, p.qty - have do
-			offerOne(p.item)
-			task.wait(0.15)
+	for _ = 1, 400 do
+		local have = sideCounts()
+		if not have then return false, "the trade closed" end
+
+		-- take out what is over first, then put in what is missing
+		local action, name
+		for n, amount in pairs(have) do
+			if amount > (want[n] or 0) then action, name = "remove", n break end
 		end
-		offered[raw] = { item = p.item, qty = p.qty }
+		if not action then
+			for n, amount in pairs(want) do
+				if (have[n] or 0) < amount then action, name = "add", n break end
+			end
+		end
+		if not action then return true end
+
+		local item = byName[name]
+		if not item then return false, "no inventory entry for " .. name end
+
+		local before = have[name] or 0
+		if action == "add" then offerOne(item) else removeOne(item) end
+
+		-- wait for the window to show it
+		local moved = false
+		for _ = 1, 15 do
+			task.wait(0.1)
+			local now = sideCounts()
+			if not now then return false, "the trade closed" end
+			if (now[name] or 0) ~= before then moved = true break end
+		end
+		if not moved then
+			return false, string.format("%s %s did nothing in the game", action, name)
+		end
 	end
+
+	return false, "too many steps"
 end
 
 -- The search works in whole numbers, so $ mode counts in cents.
@@ -4011,15 +4052,22 @@ local function fillFor(their)
 	local inUsd  = bot.mode == "usd"
 	local target = inUsd and cents(usdSumOf(their)) or sumOf(their)
 
-	if target <= 0 then
-		applyPlan({})
-		log("Auto fill: their side is empty, your side cleared")
-		return
-	end
+	if fillStuck then return end
 
 	local items = offerableItems()
 	if not items then
 		log("Auto fill: could not read your inventory")
+		return
+	end
+
+	if target <= 0 then
+		local ok, why = applyPlan({}, items)
+		if not ok then
+			fillStuck = true
+			log("Auto fill STOPPED for this trade: " .. why)
+			return
+		end
+		log("Auto fill: their side is empty, your side cleared")
 		return
 	end
 
@@ -4037,7 +4085,12 @@ local function fillFor(their)
 
 	local minProfit = inUsd and cents(FILL_MIN_PROFIT_USD) or FILL_MIN_PROFIT
 	local plan, total = planOffer(pool, target, minProfit)
-	applyPlan(plan)
+	local ok, why = applyPlan(plan, items)
+	if not ok then
+		fillStuck = true
+		log("Auto fill STOPPED for this trade: " .. why .. ". Check your side by hand.")
+		return
+	end
 
 	local parts = {}
 	for _, p in ipairs(plan) do
@@ -4074,8 +4127,17 @@ end
 
 local function resetFill()
 	fillToken = fillToken + 1
-	offered = {}
+	fillStuck = false
 	autoFill.busy = false
+end
+
+-- Never auto accept a trade that does not leave the minimum profit,
+-- whatever put the items there.
+local function profitOk(trade)
+	if bot.mode == "usd" then
+		return cents(usdSumOf(trade.their)) - cents(usdSumOf(trade.mine)) >= cents(FILL_MIN_PROFIT_USD)
+	end
+	return sumOf(trade.their) - sumOf(trade.mine) >= FILL_MIN_PROFIT
 end
 
 -- ===================================================================
@@ -4375,6 +4437,14 @@ task.spawn(function()
 			-- accepted bar, keep waiting (armed stays set)
 			local trade = readTrade(false)
 			if not (trade and trade.theirAccepted) then return end
+
+			if not profitOk(trade) then
+				if armed ~= "blocked" then
+					log("Auto accept: not pressed, this trade is under the minimum profit")
+				end
+				armed = "blocked"
+				return
+			end
 
 			local textObj = findAcceptText()
 			if not textObj then return end
