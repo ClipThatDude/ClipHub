@@ -3997,7 +3997,7 @@ end
 -- and refill after refill piled items on (66 Corrupt against a 239
 -- dollar offer). Now a call that does not show up on the window stops
 -- the fill instead of being assumed.
-local function applyPlan(plan, items)
+local function applyPlan(plan, items, isCurrent)
 	local want, byName = {}, {}
 	for _, it in ipairs(items or {}) do byName[it.name] = it end
 	for _, p in ipairs(plan) do
@@ -4006,6 +4006,9 @@ local function applyPlan(plan, items)
 	end
 
 	for _ = 1, 400 do
+		-- their side changed again; the newer fill takes over from here
+		if isCurrent and not isCurrent() then return "superseded" end
+
 		local have = sideCounts()
 		if not have then return false, "the trade closed" end
 
@@ -4048,7 +4051,7 @@ local function cents(usd)
 	return math.floor(usd * 100 + 0.5)
 end
 
-local function fillFor(their)
+local function fillFor(their, isCurrent)
 	local inUsd  = bot.mode == "usd"
 	local target = inUsd and cents(usdSumOf(their)) or sumOf(their)
 
@@ -4061,7 +4064,8 @@ local function fillFor(their)
 	end
 
 	if target <= 0 then
-		local ok, why = applyPlan({}, items)
+		local ok, why = applyPlan({}, items, isCurrent)
+		if ok == "superseded" then return end
 		if not ok then
 			fillStuck = true
 			log("Auto fill STOPPED for this trade: " .. why)
@@ -4085,7 +4089,8 @@ local function fillFor(their)
 
 	local minProfit = inUsd and cents(FILL_MIN_PROFIT_USD) or FILL_MIN_PROFIT
 	local plan, total = planOffer(pool, target, minProfit)
-	local ok, why = applyPlan(plan, items)
+	local ok, why = applyPlan(plan, items, isCurrent)
+	if ok == "superseded" then return end
 	if not ok then
 		fillStuck = true
 		log("Auto fill STOPPED for this trade: " .. why .. ". Check your side by hand.")
@@ -4105,6 +4110,11 @@ end
 
 local fillToken = 0
 
+-- Only one fill may move items at a time. Two used to run side by side
+-- when their side changed while a long fill (dozens of single units)
+-- was still going, and both added to the same slots.
+local fillRunning = false
+
 -- called by the trade watcher whenever their side changes
 local function scheduleFill(their)
 	if not bot.autoFill or bot.paused then return end
@@ -4115,11 +4125,23 @@ local function scheduleFill(their)
 
 	task.delay(FILL_DEBOUNCE, function()
 		if token ~= fillToken then return end
+
+		-- the running fill sees it is out of date at its next step and
+		-- stops; wait for that before starting
+		while fillRunning do
+			task.wait(0.1)
+			if token ~= fillToken then return end
+		end
+
 		if bot.paused or not bot.autoFill then
 			autoFill.busy = false
 			return
 		end
-		local ok, err = pcall(fillFor, their)
+
+		fillRunning = true
+		local ok, err = pcall(fillFor, their, function() return token == fillToken end)
+		fillRunning = false
+
 		if not ok then log("Auto fill failed: " .. tostring(err)) end
 		if token == fillToken then autoFill.busy = false end
 	end)
