@@ -3064,22 +3064,48 @@ local function buildPanel()
 	----------------------------------------------------------------
 	-- TRADE PRIORITY
 	----------------------------------------------------------------
-	pageTitle(pagePrio, "Trade Priority", "Auto fill gives the picked items away first")
+	pageTitle(pagePrio, "Trade Priority", "Auto fill gives the picked items away first, then uses the rest")
 
 	local prioTop = card(pagePrio, UDim2.fromOffset(26, 83), UDim2.fromOffset(519, 62))
 	ui.prioCount = label(prioTop, "Count", "0 items picked",
 		UDim2.fromOffset(14, 8), UDim2.fromOffset(330, 22), 13, true)
 	ui.prioCount.TextColor3 = C.greenTxt
-	local prioSub = label(prioTop, "Sub", "Your tradeable items. Switch the ones to give away first.",
+	local prioSub = label(prioTop, "Sub", "Pick as many as you like. The others still fill what is left.",
 		UDim2.fromOffset(14, 32), UDim2.fromOffset(330, 18), 10, false)
 	prioSub.TextColor3 = C.dim
 
 	local prioRefresh = button(prioTop, "Refresh", "REFRESH",
 		UDim2.fromOffset(356, 14), UDim2.fromOffset(148, 34), C.blue)
 
+	local prioSearch = Instance.new("TextBox")
+	prioSearch.Position = UDim2.fromOffset(26, 155)
+	prioSearch.Size = UDim2.fromOffset(379, 30)
+	prioSearch.BackgroundColor3 = C.field
+	prioSearch.BorderSizePixel = 0
+	prioSearch.ClearTextOnFocus = false
+	prioSearch.Font = Enum.Font.Gotham
+	prioSearch.PlaceholderText = "Search item..."
+	prioSearch.PlaceholderColor3 = C.dim
+	prioSearch.Text = ""
+	prioSearch.TextColor3 = C.text
+	prioSearch.TextSize = 12
+	prioSearch.TextXAlignment = Enum.TextXAlignment.Left
+	prioSearch.Parent = pagePrio
+	corner(prioSearch, 7)
+
+	local psPad = Instance.new("UIPadding")
+	psPad.PaddingLeft = UDim.new(0, 10)
+	psPad.Parent = prioSearch
+
+	-- one button that steps through the filters
+	local PRIO_FILTERS = { "All", "Picked", "Chroma", "Ancient", "Godly", "Vintage", "Unique" }
+	local prioFilter = 1
+	local prioFilterBtn = button(pagePrio, "Filter", "FILTER: ALL",
+		UDim2.fromOffset(415, 155), UDim2.fromOffset(130, 30), C.neutral)
+
 	local prioList = Instance.new("ScrollingFrame")
-	prioList.Position = UDim2.fromOffset(26, 157)
-	prioList.Size = UDim2.fromOffset(519, 259)
+	prioList.Position = UDim2.fromOffset(26, 193)
+	prioList.Size = UDim2.fromOffset(519, 223)
 	prioList.BackgroundColor3 = C.card
 	prioList.BorderSizePixel = 0
 	prioList.ScrollBarThickness = 5
@@ -3107,9 +3133,101 @@ local function buildPanel()
 		safeSet(ui.prioCount, "Text", n .. (n == 1 and " item picked" or " items picked"))
 	end
 
+	-- your items, read once per REFRESH; search and filter work on this
+	local prioItems = nil
+
+	local function renderPriority()
+		for _, child in ipairs(prioList:GetChildren()) do
+			if child:IsA("Frame") or child:IsA("TextLabel") then child:Destroy() end
+		end
+		if not prioItems then return end
+
+		-- picked items you no longer own still get a row, so they can be
+		-- switched off
+		local rows, seen = {}, {}
+		for _, it in ipairs(prioItems) do
+			table.insert(rows, it)
+			seen[it.key] = true
+		end
+		for key, name in pairs(bot.priority) do
+			if not seen[key] then
+				local value, category = valueOf(name)
+				table.insert(rows, { key = key, name = name, amount = 0,
+					value = value, usd = usdOf(name), category = category })
+			end
+		end
+
+		local query = squash(prioSearch.Text)
+		local filter = PRIO_FILTERS[prioFilter]
+		local shown = {}
+		for _, it in ipairs(rows) do
+			local picked = bot.priority[it.key] ~= nil
+			local okSearch = query == "" or it.key:find(query, 1, true)
+			local okFilter = filter == "All"
+				or (filter == "Picked" and picked)
+				or it.category == filter
+			if okSearch and okFilter then table.insert(shown, it) end
+		end
+
+		table.sort(shown, function(a, b)
+			local pa, pb = bot.priority[a.key] ~= nil, bot.priority[b.key] ~= nil
+			if pa ~= pb then return pa end
+			return a.value * math.max(a.amount, 1) > b.value * math.max(b.amount, 1)
+		end)
+
+		if #shown == 0 then
+			local empty = label(prioList, "Empty", "No matching items.",
+				UDim2.fromOffset(0, 0), UDim2.new(1, 0, 0, 30), 11, false)
+			empty.TextColor3 = C.dim
+			return
+		end
+
+		for index, it in ipairs(shown) do
+			local row = Instance.new("Frame")
+			row.Size = UDim2.new(1, 0, 0, 46)
+			row.BackgroundColor3 = Color3.fromRGB(30, 31, 38)
+			row.BorderSizePixel = 0
+			row.LayoutOrder = index
+			row.Parent = prioList
+			corner(row, 7)
+
+			local n = label(row, "Name", it.name, UDim2.fromOffset(12, 5),
+				UDim2.fromOffset(260, 20), 12, true)
+			n.TextTruncate = Enum.TextTruncate.AtEnd
+			n.TextColor3 = CATEGORY_COLOR3[it.category] or C.text
+
+			local info = it.amount > 0
+				and string.format("x%d  ·  %s Value  ·  %s each", it.amount, comma(it.value), money(it.usd))
+				or "not in your inventory"
+			local sub = label(row, "Sub", info,
+				UDim2.fromOffset(12, 24), UDim2.fromOffset(300, 16), 10, false)
+			sub.TextColor3 = C.dim
+
+			local toggle = button(row, "Toggle", "",
+				UDim2.new(1, -112, 0.5, -13), UDim2.fromOffset(100, 26))
+
+			local function paint()
+				local on = bot.priority[it.key] ~= nil
+				toggle.Text = on and "PRIORITY" or "off"
+				toggle.BackgroundColor3 = on and C.green or C.neutral
+			end
+			paint()
+
+			toggle.MouseButton1Click:Connect(function()
+				if bot.priority[it.key] then
+					bot.priority[it.key] = nil
+				else
+					bot.priority[it.key] = it.name
+				end
+				paint()
+				countPicked()
+				savePriority()
+			end)
+		end
+	end
+
 	local prioLoading = false
 
-	-- one row per item you own that has a value, picked ones on top
 	local function refreshPriority()
 		if prioLoading then return end
 		if not bot.listItems then
@@ -3129,10 +3247,10 @@ local function buildPanel()
 				safeSet(prioSub, "Text", "Could not read your inventory, try REFRESH.")
 				return
 			end
-			safeSet(prioSub, "Text", "Your tradeable items. Switch the ones to give away first.")
+			safeSet(prioSub, "Text", "Pick as many as you like. The others still fill what is left.")
 
 			-- the same item can sit under more than one internal name
-			local merged, order = {}, {}
+			local merged, list = {}, {}
 			for _, it in ipairs(items) do
 				local key = squash(it.name)
 				if merged[key] then
@@ -3140,65 +3258,23 @@ local function buildPanel()
 				else
 					merged[key] = { key = key, name = it.name, amount = it.amount,
 						value = it.value, usd = it.usd or 0, category = it.category }
-					table.insert(order, merged[key])
+					table.insert(list, merged[key])
 				end
 			end
-			table.sort(order, function(a, b)
-				local pa, pb = bot.priority[a.key] ~= nil, bot.priority[b.key] ~= nil
-				if pa ~= pb then return pa end
-				return a.value * a.amount > b.value * b.amount
-			end)
 
-			for _, child in ipairs(prioList:GetChildren()) do
-				if child:IsA("Frame") then child:Destroy() end
-			end
-
-			for index, it in ipairs(order) do
-				local row = Instance.new("Frame")
-				row.Size = UDim2.new(1, 0, 0, 46)
-				row.BackgroundColor3 = Color3.fromRGB(30, 31, 38)
-				row.BorderSizePixel = 0
-				row.LayoutOrder = index
-				row.Parent = prioList
-				corner(row, 7)
-
-				local n = label(row, "Name", it.name, UDim2.fromOffset(12, 5),
-					UDim2.fromOffset(260, 20), 12, true)
-				n.TextTruncate = Enum.TextTruncate.AtEnd
-				n.TextColor3 = CATEGORY_COLOR3[it.category] or C.text
-
-				local sub = label(row, "Sub", string.format("x%d  ·  %s Value  ·  %s each",
-					it.amount, comma(it.value), money(it.usd)),
-					UDim2.fromOffset(12, 24), UDim2.fromOffset(300, 16), 10, false)
-				sub.TextColor3 = C.dim
-
-				local toggle = button(row, "Toggle", "",
-					UDim2.new(1, -112, 0.5, -13), UDim2.fromOffset(100, 26))
-
-				local function paint()
-					local on = bot.priority[it.key] ~= nil
-					toggle.Text = on and "PRIORITY" or "off"
-					toggle.BackgroundColor3 = on and C.green or C.neutral
-				end
-				paint()
-
-				toggle.MouseButton1Click:Connect(function()
-					if bot.priority[it.key] then
-						bot.priority[it.key] = nil
-					else
-						bot.priority[it.key] = it.name
-					end
-					paint()
-					countPicked()
-					savePriority()
-				end)
-			end
-
+			prioItems = list
+			renderPriority()
 			countPicked()
 		end)
 	end
 
 	prioRefresh.MouseButton1Click:Connect(refreshPriority)
+	prioSearch:GetPropertyChangedSignal("Text"):Connect(renderPriority)
+	prioFilterBtn.MouseButton1Click:Connect(function()
+		prioFilter = prioFilter % #PRIO_FILTERS + 1
+		prioFilterBtn.Text = "FILTER: " .. PRIO_FILTERS[prioFilter]:upper()
+		renderPriority()
+	end)
 	countPicked()
 
 	----------------------------------------------------------------
