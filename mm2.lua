@@ -771,8 +771,11 @@ end
 -- ===================================================================
 local lookup, catOf, displayOf, sortedItems, itemCount = {}, {}, {}, {}, 0
 
--- dollar price per item, from the "usd" table in values.json
-local usdLookup = {}
+-- Dollar prices per item from values.json. "usd" is what an item is
+-- worth to you when you receive it (buy), "usd_sell" what it counts for
+-- when you give it away (sell): a Vampire's Axe taken in at 27 and
+-- handed out at 28. An item with no sell price sells at its buy price.
+local usdLookup, usdSellLookup = {}, {}
 
 -- The game and the value site spell the same item differently:
 -- "Snow Dagger" / "SnowDagger", "Chroma Darkbringer" / "BeachyChroma".
@@ -783,10 +786,13 @@ end
 
 local function buildIndex()
 	lookup, catOf, displayOf, sortedItems, itemCount = {}, {}, {}, {}, 0
-	usdLookup = {}
+	usdLookup, usdSellLookup = {}, {}
 
 	for name, usd in pairs(DATA.usd or {}) do
 		usdLookup[squash(name)] = tonumber(usd)
+	end
+	for name, usd in pairs(DATA.usd_sell or {}) do
+		usdSellLookup[squash(name)] = tonumber(usd)
 	end
 
 	for name, value in pairs(DATA.values) do
@@ -810,6 +816,7 @@ local function buildIndex()
 			catOf[squash(alias)]     = DATA.cats[target] or "Godly"
 			displayOf[squash(alias)] = target
 			usdLookup[squash(alias)] = usdLookup[squash(target)]
+			usdSellLookup[squash(alias)] = usdSellLookup[squash(target)]
 		end
 	end
 
@@ -976,10 +983,17 @@ local function valueOf(name)
 	return lookup[key], category
 end
 
--- 0 when the item has no dollar price
+-- buy price; 0 when the item has no dollar price
 local function usdOf(name)
 	local key = resolveTiered(name)
 	return key and usdLookup[key] or 0
+end
+
+-- sell price, falling back to the buy price
+local function usdSellOf(name)
+	local key = resolveTiered(name)
+	if not key then return 0 end
+	return usdSellLookup[key] or usdLookup[key] or 0
 end
 
 local function comma(n)
@@ -1025,6 +1039,7 @@ local function applyData(fetched, stamp)
 		cats    = (type(fetched.cats) == "table") and fetched.cats or {},
 		aliases = (type(fetched.aliases) == "table") and fetched.aliases or {},
 		usd     = (type(fetched.usd) == "table") and fetched.usd or {},
+		usd_sell = (type(fetched.usd_sell) == "table") and fetched.usd_sell or {},
 	}
 
 	buildIndex()
@@ -2035,9 +2050,12 @@ local function readTrade(includeVisuals)
 				visual   = visual,
 			}
 
+			-- what they give is priced at your buy price, what you give
+			-- at your sell price
 			if entry.obj.AbsolutePosition.Y >= splitY then
 				table.insert(their, slot)
 			else
+				slot.usd = usdSellOf(label)
 				table.insert(mine, slot)
 			end
 		end
@@ -3153,7 +3171,7 @@ local function buildPanel()
 			if not seen[key] then
 				local value, category = valueOf(name)
 				table.insert(rows, { key = key, name = name, amount = 0,
-					value = value, usd = usdOf(name), category = category })
+					value = value, usd = usdSellOf(name), category = category })
 			end
 		end
 
@@ -3197,7 +3215,7 @@ local function buildPanel()
 			n.TextColor3 = CATEGORY_COLOR3[it.category] or C.text
 
 			local info = it.amount > 0
-				and string.format("x%d  ·  %s Value  ·  %s each", it.amount, comma(it.value), money(it.usd))
+				and string.format("x%d  ·  %s Value  ·  sells at %s", it.amount, comma(it.value), money(it.usd))
 				or "not in your inventory"
 			local sub = label(row, "Sub", info,
 				UDim2.fromOffset(12, 24), UDim2.fromOffset(300, 16), 10, false)
@@ -4190,7 +4208,7 @@ local function offerableItems()
 					if value > 0 then
 						table.insert(items, {
 							raw = raw, branch = branch, name = displayName(raw),
-							value = value, usd = usdOf(raw), amount = amount,
+							value = value, usd = usdSellOf(raw), amount = amount,
 							category = category,
 						})
 					end
