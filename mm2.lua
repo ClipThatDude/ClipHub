@@ -50,6 +50,9 @@ local PANEL_POS_FILE     = "mm2_value_panel_position.json"
 -- survives restarts, so a name only has to be seen once, ever.
 local NAME_MAP_FILE      = "mm2_name_map_v2.json"
 
+-- The items picked on the Priority page, kept between runs.
+local PRIORITY_FILE      = "mm2_trade_priority.json"
+
 -- Where the value list lives, so prices can be updated without handing
 -- anyone a new script. Paste a raw file link here - GitHub's
 -- raw.githubusercontent.com works, and unlike the value sites it is not
@@ -714,7 +717,41 @@ local bot = {
 	mode       = "value",
 	rearm      = false,
 	onResume   = nil,
+
+	-- items auto fill gives away first, squashed name -> display name;
+	-- picked on the Priority page. listItems is filled in by auto fill.
+	priority   = {},
+	listItems  = nil,
 }
+
+local function savePriority()
+	if not writefile then return end
+	pcall(function()
+		local names = {}
+		for _, name in pairs(bot.priority) do table.insert(names, name) end
+		table.sort(names)
+		writefile(PRIORITY_FILE, HttpService:JSONEncode(names))
+	end)
+end
+
+-- first run: Corrupt, until something else is picked
+do
+	local loaded = false
+	pcall(function()
+		if isfile and readfile and isfile(PRIORITY_FILE) then
+			local names = HttpService:JSONDecode(readfile(PRIORITY_FILE))
+			if type(names) == "table" then
+				for _, name in ipairs(names) do
+					if type(name) == "string" then
+						bot.priority[(name:lower():gsub("[^%a%d]", ""))] = name
+					end
+				end
+				loaded = true
+			end
+		end
+	end)
+	if not loaded then bot.priority.corrupt = "Corrupt" end
+end
 
 -- ===================================================================
 -- VALUE INDEX
@@ -2244,7 +2281,7 @@ local function buildPanel()
 
 	local nav = Instance.new("Frame")
 	nav.Position = UDim2.fromOffset(12, 105)
-	nav.Size = UDim2.fromOffset(146, 240)
+	nav.Size = UDim2.fromOffset(146, 270)
 	nav.BackgroundTransparency = 1
 	nav.Parent = sidebar
 
@@ -2262,6 +2299,7 @@ local function buildPanel()
 	local navValues  = navButton("NavValues",  "▤   Values",  92)
 	local navTrade   = navButton("NavTrade",   "⇄   Trade",   138)
 	local navLogs    = navButton("NavLogs",    "⚙   Logs",    184)
+	local navPrio    = navButton("NavPrio",    "★   Priority", 230)
 
 	local hint = label(sidebar, "Hint", "Right Shift\nShow / hide panel",
 		UDim2.fromOffset(18, 382), UDim2.fromOffset(138, 44), 10, false)
@@ -2289,8 +2327,9 @@ local function buildPanel()
 
 	local pagePlayers, pageInv, pageValues = newPage(), newPage(), newPage()
 	local pageTrade, pageLogs = newPage(), newPage()
-	local allPages = { pagePlayers, pageInv, pageValues, pageTrade, pageLogs }
-	local allNav   = { navPlayers, navInv, navValues, navTrade, navLogs }
+	local pagePrio = newPage()
+	local allPages = { pagePlayers, pageInv, pageValues, pageTrade, pageLogs, pagePrio }
+	local allNav   = { navPlayers, navInv, navValues, navTrade, navLogs, navPrio }
 
 	local function pageTitle(parent, text, subtext)
 		local t = label(parent, "PageTitle", text, UDim2.fromOffset(26, 18), UDim2.fromOffset(300, 28), 18, true)
@@ -3010,6 +3049,146 @@ local function buildPanel()
 	ui.logText.Font = Enum.Font.Code
 
 	----------------------------------------------------------------
+	-- TRADE PRIORITY
+	----------------------------------------------------------------
+	pageTitle(pagePrio, "Trade Priority", "Auto fill gives the picked items away first")
+
+	local prioTop = card(pagePrio, UDim2.fromOffset(26, 83), UDim2.fromOffset(519, 62))
+	ui.prioCount = label(prioTop, "Count", "0 items picked",
+		UDim2.fromOffset(14, 8), UDim2.fromOffset(330, 22), 13, true)
+	ui.prioCount.TextColor3 = C.greenTxt
+	local prioSub = label(prioTop, "Sub", "Your tradeable items. Switch the ones to give away first.",
+		UDim2.fromOffset(14, 32), UDim2.fromOffset(330, 18), 10, false)
+	prioSub.TextColor3 = C.dim
+
+	local prioRefresh = button(prioTop, "Refresh", "REFRESH",
+		UDim2.fromOffset(356, 14), UDim2.fromOffset(148, 34), C.blue)
+
+	local prioList = Instance.new("ScrollingFrame")
+	prioList.Position = UDim2.fromOffset(26, 157)
+	prioList.Size = UDim2.fromOffset(519, 259)
+	prioList.BackgroundColor3 = C.card
+	prioList.BorderSizePixel = 0
+	prioList.ScrollBarThickness = 5
+	prioList.CanvasSize = UDim2.fromOffset(0, 0)
+	prioList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	prioList.Parent = pagePrio
+	corner(prioList, 9)
+	stroke(prioList)
+
+	local prioLayout = Instance.new("UIListLayout")
+	prioLayout.Padding = UDim.new(0, 6)
+	prioLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	prioLayout.Parent = prioList
+
+	local prioPad = Instance.new("UIPadding")
+	prioPad.PaddingTop = UDim.new(0, 8)
+	prioPad.PaddingLeft = UDim.new(0, 8)
+	prioPad.PaddingRight = UDim.new(0, 8)
+	prioPad.PaddingBottom = UDim.new(0, 8)
+	prioPad.Parent = prioList
+
+	local function countPicked()
+		local n = 0
+		for _ in pairs(bot.priority) do n = n + 1 end
+		safeSet(ui.prioCount, "Text", n .. (n == 1 and " item picked" or " items picked"))
+	end
+
+	local prioLoading = false
+
+	-- one row per item you own that has a value, picked ones on top
+	local function refreshPriority()
+		if prioLoading then return end
+		if not bot.listItems then
+			safeSet(prioSub, "Text", "Starting up, try REFRESH in a moment.")
+			return
+		end
+
+		prioLoading = true
+		safeSet(prioRefresh, "Text", "...")
+
+		task.spawn(function()
+			local ok, items = pcall(bot.listItems)
+			prioLoading = false
+			safeSet(prioRefresh, "Text", "REFRESH")
+
+			if not ok or not items then
+				safeSet(prioSub, "Text", "Could not read your inventory, try REFRESH.")
+				return
+			end
+			safeSet(prioSub, "Text", "Your tradeable items. Switch the ones to give away first.")
+
+			-- the same item can sit under more than one internal name
+			local merged, order = {}, {}
+			for _, it in ipairs(items) do
+				local key = squash(it.name)
+				if merged[key] then
+					merged[key].amount = merged[key].amount + it.amount
+				else
+					merged[key] = { key = key, name = it.name, amount = it.amount,
+						value = it.value, usd = it.usd or 0, category = it.category }
+					table.insert(order, merged[key])
+				end
+			end
+			table.sort(order, function(a, b)
+				local pa, pb = bot.priority[a.key] ~= nil, bot.priority[b.key] ~= nil
+				if pa ~= pb then return pa end
+				return a.value * a.amount > b.value * b.amount
+			end)
+
+			for _, child in ipairs(prioList:GetChildren()) do
+				if child:IsA("Frame") then child:Destroy() end
+			end
+
+			for index, it in ipairs(order) do
+				local row = Instance.new("Frame")
+				row.Size = UDim2.new(1, 0, 0, 46)
+				row.BackgroundColor3 = Color3.fromRGB(30, 31, 38)
+				row.BorderSizePixel = 0
+				row.LayoutOrder = index
+				row.Parent = prioList
+				corner(row, 7)
+
+				local n = label(row, "Name", it.name, UDim2.fromOffset(12, 5),
+					UDim2.fromOffset(260, 20), 12, true)
+				n.TextTruncate = Enum.TextTruncate.AtEnd
+				n.TextColor3 = CATEGORY_COLOR3[it.category] or C.text
+
+				local sub = label(row, "Sub", string.format("x%d  ·  %s Value  ·  %s each",
+					it.amount, comma(it.value), money(it.usd)),
+					UDim2.fromOffset(12, 24), UDim2.fromOffset(300, 16), 10, false)
+				sub.TextColor3 = C.dim
+
+				local toggle = button(row, "Toggle", "",
+					UDim2.new(1, -112, 0.5, -13), UDim2.fromOffset(100, 26))
+
+				local function paint()
+					local on = bot.priority[it.key] ~= nil
+					toggle.Text = on and "PRIORITY" or "off"
+					toggle.BackgroundColor3 = on and C.green or C.neutral
+				end
+				paint()
+
+				toggle.MouseButton1Click:Connect(function()
+					if bot.priority[it.key] then
+						bot.priority[it.key] = nil
+					else
+						bot.priority[it.key] = it.name
+					end
+					paint()
+					countPicked()
+					savePriority()
+				end)
+			end
+
+			countPicked()
+		end)
+	end
+
+	prioRefresh.MouseButton1Click:Connect(refreshPriority)
+	countPicked()
+
+	----------------------------------------------------------------
 	-- PLAYER ROWS
 	----------------------------------------------------------------
 	local showInventory   -- forward declaration
@@ -3634,6 +3813,10 @@ local function buildPanel()
 	navValues.MouseButton1Click:Connect(function() showPage(3) end)
 	navTrade.MouseButton1Click:Connect(function() showPage(4) end)
 	navLogs.MouseButton1Click:Connect(function() showPage(5) end)
+	navPrio.MouseButton1Click:Connect(function()
+		showPage(6)
+		refreshPriority()
+	end)
 
 	Players.PlayerAdded:Connect(function() pcall(refreshPlayers) end)
 	Players.PlayerRemoving:Connect(function() pcall(refreshPlayers) end)
@@ -3874,13 +4057,10 @@ local FILL_MIN_PROFIT_USD = 0.50   -- $
 -- most different items one side of a trade can hold
 local FILL_MAX_TYPES = 4
 
--- Items auto fill spends first. As much of the offer as these can cover
--- goes in them; only the rest is made up from other items. A 38 dollar
--- offer becomes 6x Corrupt (36) plus about 1.50 of something else.
--- Names as the value list writes them.
-local FILL_PRIORITY = {
-	"Corrupt",
-}
+-- Items auto fill spends first are picked on the Priority page
+-- (bot.priority). As much of the offer as they can cover goes in them;
+-- only the rest is made up from other items. A 38 dollar offer becomes
+-- 6x Corrupt (36) plus about 1.50 of something else.
 
 -- inventory branches that can be traded
 local FILL_BRANCHES = { "Weapons", "Pets" }
@@ -3917,11 +4097,12 @@ local function offerableItems()
 				local amount = tonumber(count)
 				if type(raw) == "string" and amount and amount > 0
 					and not HIDDEN_ITEMS[squash(raw)] then
-					local value = valueOf(raw)
+					local value, category = valueOf(raw)
 					if value > 0 then
 						table.insert(items, {
 							raw = raw, branch = branch, name = displayName(raw),
 							value = value, usd = usdOf(raw), amount = amount,
+							category = category,
 						})
 					end
 				end
@@ -3930,6 +4111,8 @@ local function offerableItems()
 	end
 	return items
 end
+
+bot.listItems = offerableItems
 
 -- The biggest total that leaves at least FILL_MIN_PROFIT, using at most
 -- FILL_MAX_TYPES different items. Depth-first over items sorted by value,
@@ -4098,12 +4281,9 @@ local function fillFor(their, isCurrent)
 	local minProfit = inUsd and cents(FILL_MIN_PROFIT_USD) or FILL_MIN_PROFIT
 
 	-- priority items first, as much of the offer as they can cover
-	local isPriority = {}
-	for _, name in ipairs(FILL_PRIORITY) do isPriority[squash(name)] = true end
-
 	local first, rest = {}, {}
 	for _, it in ipairs(pool) do
-		table.insert(isPriority[squash(it.name)] and first or rest, it)
+		table.insert(bot.priority[squash(it.name)] and first or rest, it)
 	end
 
 	local plan, total = planOffer(first, target, minProfit)
