@@ -37,6 +37,19 @@ local HttpService       = game:GetService("HttpService")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 
+-- Running the script again without leaving the game used to leave the
+-- old copy's loops going next to the new one: two auto fills, two
+-- auto accepts, every trade posted twice. Each run now claims this
+-- slot, and every loop and handler of an older run stops once it sees
+-- it has been replaced.
+local RUN_ID = {}
+local RUN_ENV = (getgenv and getgenv()) or _G
+RUN_ENV.MM2ValuePanelRun = RUN_ID
+
+local function alive()
+	return RUN_ENV.MM2ValuePanelRun == RUN_ID
+end
+
 -- ===================================================================
 -- CONFIG
 -- ===================================================================
@@ -4331,7 +4344,7 @@ local function scheduleFill(their)
 	autoFill.busy = true
 
 	task.delay(FILL_DEBOUNCE, function()
-		if token ~= fillToken then return end
+		if token ~= fillToken or not alive() then return end
 
 		-- the running fill sees it is out of date at its next step and
 		-- stops; wait for that before starting
@@ -4346,7 +4359,7 @@ local function scheduleFill(their)
 		end
 
 		fillRunning = true
-		local ok, err = pcall(fillFor, their, function() return token == fillToken end)
+		local ok, err = pcall(fillFor, their, function() return token == fillToken and alive() end)
 		fillRunning = false
 
 		if not ok then log("Auto fill failed: " .. tostring(err)) end
@@ -4397,7 +4410,7 @@ task.spawn(function()
 		bot.rearm = true
 	end
 
-	while true do
+	while alive() do
 		task.wait(wait)
 
 		if ui.gui and ui.tradeWatching then
@@ -4605,7 +4618,7 @@ end
 
 -- 1) INCOMING TRADE REQUEST: ACCEPT
 task.spawn(function()
-	while true do
+	while alive() do
 		task.wait(1)
 		local ok, err = pcall(function()
 			if bot.paused then return end
@@ -4635,7 +4648,7 @@ end)
 task.spawn(function()
 	local armed = false
 
-	while true do
+	while alive() do
 		task.wait(1)
 		local ok, err = pcall(function()
 			if bot.paused or not bot.autoAccept then
@@ -4706,6 +4719,7 @@ end)
 pcall(function()
 	local VirtualUser = game:GetService("VirtualUser")
 	LocalPlayer.Idled:Connect(function()
+		if not alive() then return end
 		pcall(function()
 			VirtualUser:CaptureController()
 			VirtualUser:ClickButton2(Vector2.new())
@@ -4737,6 +4751,7 @@ local function togglePanel()
 end
 
 UserInputService.InputBegan:Connect(function(input)
+	if not alive() then return end
 	if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
 	if input.KeyCode ~= TOGGLE_KEY then return end
 	if UserInputService:GetFocusedTextBox() then return end
@@ -4747,7 +4762,7 @@ end)
 
 -- Only refreshes text; the lists are not rebuilt.
 task.spawn(function()
-	while true do
+	while alive() do
 		task.wait(1)
 		pcall(raiseAbove)
 		pcall(function()
